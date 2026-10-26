@@ -22,11 +22,11 @@ A small pixel-art Claude that lives on your macOS desktop. You can chat with it,
 - **Chat, or drive a real session.** Click the pet and type; press Enter to send and Esc to close. By default you're in "Pet chat", a session of its own with no tools. Use "Switch session" in the menu to attach to any recent Claude Code session, or start a new one in a folder. The pet then runs Claude Code there with its normal tools. When a tool needs approval, a card pops up above the pet's head with **Allow / Deny**. Your own permission settings still apply. "Stop" interrupts the current turn.
   Under the hood this is the same stream-json protocol the IDE extensions use: one long-lived `claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio` process per attached session.
   Attaching to a session that is still open in a terminal or IDE forks it: both continue from the same history.
-- **Claude Code activity.** While a session is working, a small label above the pet's head shows the project and the current step (for example `my-app: Bash · Run tests`). When a task that ran for more than 20 seconds finishes, the pet tells you.
+- **Claude Code activity.** While a session is working, a small label above the pet's head shows the project and the current step (for example `my-app: Bash · Run tests`). When a task that ran for more than 20 seconds finishes, the pet tells you. With the hook below, she also tells you the moment one of those sessions asks for permission (`my-app needs your permission: Bash · Run tests`).
 - **Open in Terminal.** Lists the Claude Code sessions from the last 7 days (project, title, time). Pick one and Terminal opens in that directory and runs `claude --resume` for it.
 - **Usage.** The menu-bar ✦ shows today's output tokens. The menu breaks usage down per account (output, input including cache, number of sessions) and shows the context size of the latest session.
 - **Usage panel.** Right-click the pet for a panel with your plan limits per account (5-hour and weekly, with Opus / Sonnet when your plan has them), the same percentages and reset times as `/usage` in Claude Code, plus today's tokens and what is running now. It reads Claude Code's login from the keychain the same way Claude Code does (with the `security` tool), so there is no keychain prompt.
-- **Pixel animation.** She blinks every few seconds. Now and then she reads her book, and very rarely she yawns. She smiles when a Claude Code task finishes and looks surprised when a permission card pops up. Every pose is a full pixel-art frame with only the eyes and mouth changed, so nothing gets stretched.
+- **Pixel animation.** She blinks every few seconds. Now and then she reads her book, and very rarely she yawns. She smiles when a Claude Code task finishes. Every pose is a full pixel-art frame with only the eyes and mouth changed, so nothing gets stretched.
 - Drag the pet to move it. The transparent area around the character is click-through. Sizes are Small, Medium and Large. It can stay on top, shows on every desktop, and has no Dock icon.
 
 Activity and today's tokens come from reading the local transcripts in `~/.claude/projects/**/*.jsonl`. The only network traffic is the chat, which goes through your own `claude` CLI, and, while the usage panel is open, at most one request a minute per account to `api.anthropic.com/api/oauth/usage` (the endpoint Claude Code's own `/usage` calls) with that account's login. The token is read from the keychain and not stored anywhere else. That endpoint is undocumented, so the plan limits can stop working after a Claude Code update.
@@ -48,6 +48,19 @@ Only `~/.claude` is watched by default. If you keep more than one config dir (fo
 ```sh
 defaults write io.github.kirigirihitomi.claude-pixel-pet configDirs -array ~/.claude-personal ~/.claude
 ```
+
+### Permission prompts from your terminal / IDE sessions
+
+The transcripts don't show that a session is waiting on a permission prompt, so this needs one Claude Code hook. It appends each permission request to a file the pet watches. It prints nothing, so it never answers a request for you. The bubble goes away once the session's transcript shows the answer. Add this to `~/.claude/settings.json` (and to the `settings.json` of each other config dir); it needs `jq` (built into macOS 15 and later):
+
+```json
+"hooks": {
+  "PermissionRequest": [{ "hooks": [{ "type": "command", "timeout": 5,
+    "command": "mkdir -p \"$HOME/Library/Application Support/ClaudePet\" && jq -c \"{hook_event_name, session_id, cwd, tool_name, tool_input: (.tool_input | {command, description, file_path, pattern, url})}\" >> \"$HOME/Library/Application Support/ClaudePet/events.jsonl\"" }] }]
+}
+```
+
+Sessions the pet runs itself don't need it: their permission requests already pop up as the Allow / Deny card. (The `Notification` hook's `permission_prompt` is not a substitute: Claude Code sends it only after a prompt has waited 6 seconds.)
 
 ## Files
 

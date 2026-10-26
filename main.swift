@@ -141,7 +141,7 @@ struct Activity { var working = false; var detail = ""; var project = ""; var la
 struct Usage: Equatable { var input = 0, output = 0, sessions = 0 }
 
 final class Monitor {
-    private struct FileState { var offset: UInt64 = 0; var rest = Data(); var act = Activity() }
+    private struct FileState { var offset: UInt64 = 0; var rest = Data(); var act = Activity(); var lastUser = Date.distantPast }
     private var files: [String: FileState] = [:]
     private var seen = Set<String>()                    // message ids already counted (one message spans several lines)
     private var dayStart = Date.distantPast
@@ -165,22 +165,53 @@ final class Monitor {
         return (latest, rows)
     }
 
-    private func read(_ url: URL, label: String, size: UInt64) {
-        var st = files[url.path] ?? FileState()
+    /// JSON lines appended to `url` since `st.offset` (from the start again if the file shrank).
+    private func newLines(_ url: URL, _ st: inout FileState, size: UInt64, keep: (Data) -> Bool = { _ in true }) -> [[String: Any]] {
         if size < st.offset { st = FileState() }
-        guard let h = try? FileHandle(forReadingFrom: url) else { return }
+        guard let h = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? h.close() }
         try? h.seek(toOffset: st.offset)
         st.rest += (try? h.read(upToCount: Int(size - st.offset))) ?? Data()
         st.offset = size
+        return takeJSONLines(&st.rest, keep: keep)
+    }
+
+    /// Where the Claude Code PermissionRequest hook appends its input, one JSON object per line (see README).
+    static let hookFile = home.appendingPathComponent("Library/Application Support/ClaudePet/events.jsonl")
+    private var hookState: FileState?   // nil until the first call, which skips what was there before launch
+    private var ask: (session: String, at: Date)?   // the prompt the bubble shows, until its session moves on
+    enum AskChange { case show(project: String, tool: String), hide }
+    /// The newest permission prompt from a Claude Code session; or `.hide` once the shown one is answered, which its
+    /// transcript shows as a user line after the prompt (the tool result, a denial or an interrupt).
+    func askChange() -> AskChange? {
+        let url = Self.hookFile
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? UInt64) ?? 0
+        var st = hookState ?? FileState(offset: size)
+        let mine = ignoreSession()
+        let asks = size == st.offset ? [] : newLines(url, &st, size: size).filter {
+            $0["hook_event_name"] as? String == "PermissionRequest" && $0["session_id"] as? String != mine
+        }
+        hookState = st
+        if let j = asks.last, let session = j["session_id"] as? String {
+            ask = (session, Date())
+            return .show(project: ((j["cwd"] as? String ?? "") as NSString).lastPathComponent,
+                         tool: describeTool(j["tool_name"] as? String ?? "a tool", j["tool_input"] as? [String: Any] ?? [:]))
+        }
+        if let a = ask, files.contains(where: { $0.key.contains(a.session) && $0.value.lastUser > a.at }) { ask = nil; return .hide }
+        return nil
+    }
+
+    private func read(_ url: URL, label: String, size: UInt64) {
+        var st = files[url.path] ?? FileState()
         let session = url.deletingPathExtension().lastPathComponent
-        for j in takeJSONLines(&st.rest, keep: { line in self.wanted.contains { line.range(of: $0) != nil } }) {
+        for j in newLines(url, &st, size: size, keep: { line in self.wanted.contains { line.range(of: $0) != nil } }) {
             guard let type = j["type"] as? String, type == "user" || type == "assistant",
                   let ts = (j["timestamp"] as? String).flatMap(isoFrac.date) else { continue }
             let msg = j["message"] as? [String: Any] ?? [:]
             let content = msg["content"] as? [[String: Any]] ?? []
             if let cwd = j["cwd"] as? String { st.act.project = (cwd as NSString).lastPathComponent }
             if type == "user" {
+                st.lastUser = max(st.lastUser, ts)
                 let isPrompt = msg["content"] is String || content.contains { $0["type"] as? String == "text" }
                 if isPrompt && !st.act.working { st.act.since = ts }
                 st.act.working = true
@@ -553,7 +584,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         sigterm?.setEventHandler { NSApp.terminate(nil) }; sigterm?.resume()
         Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { [weak self] _ in self?.tick() }
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.pollActivity() }
-        pollActivity(); refreshSessions()
+        pollActivity(); refreshSessions(); watchPermissionPrompts()
         pollQueue.async { _ = claudeLaunch }   // resolve the claude path early, off the main thread
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.say("Hello. Click me to chat.") }
     }
@@ -631,9 +662,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         bubbleTimer = Timer.scheduledTimer(withTimeInterval: hold ?? max(4, Double(text.count) / 12), repeats: true) { [weak self] tm in
             guard let self else { return }
             if self.agent.busy || !self.input.isHidden { return }   // check again next period
-            self.bubble.isHidden = true; tm.invalidate()
+            self.hideBubble()
         }
     }
+    func hideBubble() { bubble.isHidden = true; bubbleTimer?.invalidate() }
     func readTime(_ s: String) -> TimeInterval { 15 + Double(s.count) / 4 }   // ~4 CJK chars/s, plus slack
 
     // input
@@ -673,7 +705,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     func showCard() {
         if let p = pending.first {
             card.label.stringValue = "\(agent.target.name) wants to run:\n\(p.title)"
-            window.orderFrontRegardless(); play([(.surprised, 1.2)], .talk)
+            window.orderFrontRegardless()
         }
         layoutOverlays()
     }
@@ -700,6 +732,35 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             guard let self else { return }
             let (act, rows) = self.monitor.poll()
             DispatchQueue.main.async { self.polling = false; self.show(act, rows) }
+            self.updateAsk()   // hides the permission bubble once answered; also a fallback for the watcher
+        }
+    }
+
+    // a terminal / IDE session is waiting on a permission prompt (sessions the pet runs get a card instead)
+    var hookWatch: DispatchSourceFileSystemObject?, askText: String?
+    func watchPermissionPrompts() {   // show a prompt the moment the hook writes it, not on the next 2 s poll
+        let url = Monitor.hookFile
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: url.path, contents: nil)   // start empty: older prompts don't matter
+        let fd = open(url.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.extend, .write], queue: pollQueue)
+        src.setEventHandler { [weak self] in self?.updateAsk() }
+        src.setCancelHandler { close(fd) }
+        src.resume(); hookWatch = src
+    }
+    func updateAsk() {   // on pollQueue
+        guard let change = monitor.askChange() else { return }
+        DispatchQueue.main.async {
+            switch change {
+            case .show(let project, let tool):
+                guard self.pending.isEmpty else { return }
+                self.askText = "\(project) needs your permission: \(tool)"
+                self.window.orderFrontRegardless(); self.say(self.askText!, hold: 120)
+            case .hide:
+                if self.bubble.string == self.askText { self.hideBubble() }
+                self.askText = nil
+            }
         }
     }
 
