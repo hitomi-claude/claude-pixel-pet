@@ -64,14 +64,17 @@ let isoFrac: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOp
 let isoPlain = ISO8601DateFormatter()
 func shortCount(_ n: Int) -> String { n >= 1_000_000 ? String(format: "%.1fM", Double(n) / 1e6) : n >= 1000 ? "\(n / 1000)k" : "\(n)" }
 
-// MARK: voice: short sine "blips" rendered once into in-memory WAVs
+// MARK: voice: short blips rendered once into in-memory WAVs
 
-/// One blip: a sine at `f` Hz for 50 ms, 4 ms attack then a straight fade to silence.
-func blipSound(_ f: Double, volume: Double = 0.3) -> NSSound {
-    let rate = 44100, n = rate / 20, attack = Double(rate) * 0.004
+/// One blip, 44.1 kHz mono. Soft: a sine, 4 ms attack then a straight fade over 50 ms. 8-bit: a 25% pulse (the NES
+/// square), 1 ms attack then an exponential fade (time constant 15 ms) over 55 ms.
+func blipSound(_ f: Double, pulse: Bool = false) -> NSSound {
+    let rate = 44100.0, n = Int(rate * (pulse ? 0.055 : 0.05)), attack = rate * (pulse ? 0.001 : 0.004)
     let samples: [Int16] = (0..<n).map { i in
-        let env = min(Double(i) / attack, (Double(n) - Double(i)) / (Double(n) - attack))
-        return Int16(sin(2 * .pi * f * Double(i) / Double(rate)) * env * volume * 32767)
+        let x = Double(i)
+        let wave = pulse ? ((x * f / rate).truncatingRemainder(dividingBy: 1) < 0.25 ? 1.0 : -1.0) : sin(2 * .pi * f * x / rate)
+        let env = pulse ? min(1, x / attack) * exp(-x / (rate * 0.015)) : min(x / attack, (Double(n) - x) / (Double(n) - attack))
+        return Int16(wave * env * (pulse ? 0.13 : 0.3) * 32767)
     }
     var d = Data()
     func put<T: FixedWidthInteger>(_ v: T) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
@@ -81,12 +84,31 @@ func blipSound(_ f: Double, volume: Double = 0.3) -> NSSound {
     return NSSound(data: d)!
 }
 
+/// The talking voice, picked in the menu.
+enum Voice: String, CaseIterable {
+    case soft, chip, off
+    var title: String {
+        switch self {
+        case .soft: return "Soft (every other character)"
+        case .chip: return "8-bit (every character)"
+        case .off: return "Off"
+        }
+    }
+    var gap: Double { self == .chip ? 0 : 0.18 }   // least time between two blips
+    static func saved() -> Voice {   // read once at launch; "sound" = false is the old Sound effects switch
+        Voice(rawValue: UserDefaults.standard.string(forKey: "voice") ?? "")
+            ?? (UserDefaults.standard.object(forKey: "sound") as? Bool == false ? .off : .soft)
+    }
+}
 enum Sfx {
-    /// Talking blips: C5 D5 E5 F5 G5 A5, each repeated by how often it's picked (C, D, G, A most), one at random per blip.
-    static let blips = [(523.25, 3), (587.33, 4), (659.25, 1), (698.46, 1), (783.99, 3), (880.0, 3)]
+    /// Soft: C5 D5 E5 F5 G5 A5, each repeated by how often it's picked (C, D, G, A most). 8-bit: G5, detuned ±4%.
+    static let soft = [(523.25, 3), (587.33, 4), (659.25, 1), (698.46, 1), (783.99, 3), (880.0, 3)]
         .flatMap { f, w in Array(repeating: blipSound(f), count: w) }
-    static var on: Bool { UserDefaults.standard.object(forKey: "sound") as? Bool ?? true }
-    static func play(_ s: NSSound) { guard on else { return }; s.stop(); s.play() }
+    static let chip = [0.96, 0.98, 0.99, 1.0, 1.01, 1.02, 1.04].map { blipSound(783.99 * $0, pulse: true) }
+    static func blip(_ v: Voice) {
+        guard let s = (v == .chip ? chip : v == .soft ? soft : []).randomElement() else { return }
+        s.stop(); s.play()
+    }
 }
 
 // MARK: sprite
@@ -629,7 +651,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { [weak self] _ in self?.tick() }
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.pollActivity() }
         pollActivity(); refreshSessions(); watchPermissionPrompts()
-        pollQueue.async { _ = claudeLaunch; _ = Sfx.blips }   // resolve the claude path and build the blips early, off main
+        pollQueue.async { _ = claudeLaunch; _ = Sfx.soft; _ = Sfx.chip }   // resolve the claude path and build the blips early, off main
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.say("Hello. Click me to chat.") }
     }
 
@@ -687,7 +709,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     // ends, faster for long text so it takes ~5 s at most) with a blip at most every 0.18 s; say() plays the mouth
     // flap on the same schedule
     var typing: (full: [Character], shown: Int, next: Double, step: Double, voiced: Bool)?
-    var lastBlip = 0.0, sayText = ""   // when the last blip played; the whole text being said
+    var voice = Voice.saved(), lastBlip = 0.0, sayText = ""   // the voice picked; when the last blip played; the whole text being said
     let pauses = Set(",.!?;:，。！？；：、\n")
     func pauseAfter(_ c: Character, step: Double) -> Double { pauses.contains(c) ? step * 2.8 : step }
     func typeStep() {   // called by tick
@@ -695,7 +717,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let before = ty.shown
         while ty.shown < ty.full.count && t >= ty.next {
             let c = ty.full[ty.shown]; ty.shown += 1; ty.next += pauseAfter(c, step: ty.step)
-            if ty.voiced && !pauses.contains(c) && !c.isWhitespace && t - lastBlip >= 0.18 { Sfx.play(Sfx.blips.randomElement()!); lastBlip = t }
+            if ty.voiced && !pauses.contains(c) && !c.isWhitespace && t - lastBlip >= voice.gap { Sfx.blip(voice); lastBlip = t }
         }
         if ty.shown != before { bubble.string = String(ty.full.prefix(ty.shown)); layoutOverlays() }
         typing = ty.shown == ty.full.count ? nil : ty
@@ -895,7 +917,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     // menu
     var usageItems: [NSMenuItem] = []
-    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), characterMenu = NSMenu()
+    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), voiceMenu = NSMenu(), characterMenu = NSMenu()
     var sessions: [Session] = []
     func refreshSessions() {   // off the main thread; the submenus show the last result
         pollQueue.async { let s = recentSessions(); DispatchQueue.main.async { self.sessions = s } }
@@ -918,7 +940,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         }
         let top = m.addItem(withTitle: "Always on top", action: #selector(toggleTop(_:)), keyEquivalent: "")
         top.state = window.level == .floating ? .on : .off
-        m.addItem(withTitle: "Sound effects", action: #selector(toggleSound(_:)), keyEquivalent: "").state = Sfx.on ? .on : .off
+        m.addItem(withTitle: "Voice", action: nil, keyEquivalent: "").submenu = voiceMenu
+        for (i, v) in Voice.allCases.enumerated() {
+            let it = voiceMenu.addItem(withTitle: v.title, action: #selector(pickVoice(_:)), keyEquivalent: "")
+            it.target = self; it.tag = i; it.state = v == voice ? .on : .off
+        }
         m.addItem(withTitle: "Character", action: nil, keyEquivalent: "").submenu = characterMenu
         m.addItem(withTitle: "Hide / Show", action: #selector(toggleShow), keyEquivalent: "")
         m.addItem(.separator())
@@ -991,8 +1017,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         s.state = window.level == .floating ? .on : .off
         UserDefaults.standard.set(window.level == .floating, forKey: "onTop")
     }
-    @objc func toggleSound(_ s: NSMenuItem) {
-        UserDefaults.standard.set(!Sfx.on, forKey: "sound"); s.state = Sfx.on ? .on : .off
+    @objc func pickVoice(_ s: NSMenuItem) {
+        voice = Voice.allCases[s.tag]; UserDefaults.standard.set(voice.rawValue, forKey: "voice")
+        voiceMenu.items.forEach { $0.state = $0 === s ? .on : .off }
+        say(voice == .off ? "Quiet now." : "Like this?")
     }
     @objc func pickCharacter(_ item: NSMenuItem) {
         guard let dir = item.representedObject as? URL, let s = Sprite(dir) else { return say("I can't open that one.") }
