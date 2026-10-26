@@ -1,4 +1,4 @@
-"""Build Resources/AppIcon.icns from a character sprite: head and shoulders on a rounded navy plate, laid out on
+"""Build Resources/AppIcon.icns from a character sprite: head and shoulders on a rounded cream plate, laid out on
 Apple's 1024 grid (100 px inset, 185 px corners), then every size from 16 to 512 @1x/@2x through iconutil.
 Usage: python3 make_icon.py sprite.png [out.icns] [--png preview.png]
   sprite.png  the full-body sprite with a transparent background; use the largest version you have (the shipped
@@ -18,7 +18,7 @@ src = Image.open(args.sprite).convert("RGBA")
 k = src.height / 600
 head = src.crop((round(40 * k), 0, round(320 * k), round(280 * k)))   # whole head, sunflower, ribbon, book, down to the chest
 
-top, bottom = np.array([52, 58, 86, 255]), np.array([24, 27, 44, 255])   # navy, like the channel's video backgrounds
+top, bottom = np.array([255, 243, 226, 255]), np.array([255, 213, 168, 255])   # cream to peach, warm like her hair
 
 def render(W):   # the icon at W px: Apple's grid scaled from 1024 (100 px inset, 185 px corners)
     inset, radius = round(W * 100 / 1024), round(W * 185 / 1024)
