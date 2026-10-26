@@ -1,6 +1,6 @@
 """Scale and place a new full-body pose so it lines up with closed.png.
 Two anchors that a pose redraws least: a rigid mark on the head (Claude's sunflower) and the soles. The mark is found
-by template matching, the soles are the lowest opaque row; the pose is scaled so mark-to-soles matches closed.png,
+by template matching near where it sits above the feet in closed.png (the book cover has a sunflower too), the soles are the lowest opaque row; the pose is scaled so mark-to-soles matches closed.png,
 then moved so the soles and the middle of the feet match. Image edits don't keep the figure's size or place (more so
 with a padded source), so nothing here relies on the source image.
 A pose that reaches past closed.png (raised arms) grows the canvas upwards and equally to both sides, so the bottom
@@ -32,9 +32,13 @@ tpl, (cy, cx) = flat(base.crop(m)), feet(base)
 best = None
 for s in H / pose.height * np.arange(0.75, 1.45, 0.005):   # raised arms make the pose taller than closed.png
     q = pose.resize((round(pose.width * s), round(pose.height * s)), Image.LANCZOS); img = flat(q)
-    if img.shape[0] < tpl.shape[0] or img.shape[1] < tpl.shape[1]: continue
-    e, _, (_, my), _ = cv2.minMaxLoc(cv2.matchTemplate(img, tpl, cv2.TM_SQDIFF))
-    if best is None or e < best[0]: best = (e, s, my, q)
+    # look only near where the mark sits relative to the feet in closed.png: a book cover can carry the same sunflower
+    qy, qx = feet(q); r = round(H * 0.12)
+    x0, y0 = max(0, round(qx - (cx - m[0])) - r), max(0, round(qy - (cy - m[1])) - r)
+    win = img[y0:y0 + tpl.shape[0] + 2 * r, x0:x0 + tpl.shape[1] + 2 * r]
+    if win.shape[0] < tpl.shape[0] or win.shape[1] < tpl.shape[1]: continue
+    e, _, (_, my), _ = cv2.minMaxLoc(cv2.matchTemplate(win, tpl, cv2.TM_SQDIFF))
+    if best is None or e < best[0]: best = (e, s, y0 + my, q)
 e, s, my, q = best
 py, _ = feet(q)
 k = s * (cy - m[1]) / (py - my)   # mark top to soles, as in closed.png

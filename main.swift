@@ -127,7 +127,7 @@ struct Tune: RandomNumberGenerator {
 /// Sprite frames, one PNG each in a character's folder. closed/half/open are the mouth while talking, then face poses,
 /// then full-body poses (sleep, work, stretch), which may be bigger than closed.png.
 enum Pose: String, CaseIterable {
-    case closed, half, open, blink_half, blink_closed, read, yawn, smile, surprised, sleep, work, stretch
+    case closed, half, open, blink_half, blink_closed, read, yawn, surprised, sleep, work, stretch
     func png(in dir: URL) -> URL { dir.appendingPathComponent("\(rawValue).png") }
     var standIn: Pose? {   // shown when a character lacks this full-body pose
         switch self { case .sleep: .blink_closed; case .work: .read; case .stretch: .yawn; default: nil }
@@ -901,7 +901,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let working = fresh && (act?.working ?? false)
         otherActivity = working ? "\(act!.project): \(act!.detail)" : ""
         if wasWorking && !working, let a = act, fresh, a.last.timeIntervalSince(a.since) > 20, !agent.busy {
-            say("Done in \(a.project). Your turn.", then: [(.stretch, 1.6), (.smile, 2.5)])
+            say("Done in \(a.project). Your turn.", then: [(.stretch, 1.6)])
         }
         if working || agent.busy { poke() }
         wasWorking = working
@@ -1085,7 +1085,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     /// Copies a chosen folder into the characters folder (named after it) and switches to it. It needs closed.png;
     /// the other poses are optional (see README).
     @objc func addCharacter() {
-        guard let src = pickFolder("A folder with closed.png (and optionally half, open, blink_half, blink_closed, read, yawn, smile, surprised .png)") else { return }
+        guard let src = pickFolder("A folder with closed.png (and optionally half, open, blink_half, blink_closed, read, yawn, surprised, sleep, work, stretch .png)") else { return }
         guard let s = Sprite(src) else { return say("That folder needs a closed.png, the neutral frame.") }
         let fm = FileManager.default, taken = Set(characters().map(\.name))
         var name = src.lastPathComponent, n = 2
