@@ -651,7 +651,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }
-        view.onTouch = { [weak self] in self?.poke() }
+        view.onTouch = { [weak self] in guard let self else { return }; self.poke(self.startle) }
         view.onRightClick = { [weak self] in self?.toggleUsagePanel() }
         window.contentView = view
         input.isHidden = true; input.delegate = self
@@ -727,13 +727,14 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         view.fade = abs(target - view.fade) < 0.01 ? target : view.fade + (target - view.fade) * 0.2
         if anim.isEmpty && t >= nextIdle && !asleep { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
     }
-    // dozes off after 5 minutes without a click, a word or a busy Claude Code session; poke() wakes her with a stretch
+    // dozes off after 5 minutes without a click, a word or a busy Claude Code session; poke() wakes her with a stretch, or with a start when she's clicked
     // a full-body pose stays up at least bodyHold seconds, so she doesn't flicker between them
     var lastActive = 0.0, bodySince = 0.0
     let bodyHold = 1.0, wake: [(Pose, Double)] = [(.stretch, 1.6), (.blink_half, 0.1)]
+    lazy var startle = [(Pose.surprised, 1.2)] + blink
     var asleep: Bool { t - lastActive > 300 }
-    func poke() {
-        if asleep { play(wake, .expression) }
+    func poke(_ wakeup: [(Pose, Double)]? = nil) {
+        if asleep { play(wakeup ?? wake, .expression) }
         lastActive = t
     }
 
