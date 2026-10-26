@@ -64,6 +64,31 @@ let isoFrac: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOp
 let isoPlain = ISO8601DateFormatter()
 func shortCount(_ n: Int) -> String { n >= 1_000_000 ? String(format: "%.1fM", Double(n) / 1e6) : n >= 1000 ? "\(n / 1000)k" : "\(n)" }
 
+// MARK: voice: short sine "blips" rendered once into in-memory WAVs
+
+/// One blip: a sine at `f` Hz for 50 ms, 4 ms attack then a straight fade to silence.
+func blipSound(_ f: Double, volume: Double = 0.3) -> NSSound {
+    let rate = 44100, n = rate / 20, attack = Double(rate) * 0.004
+    let samples: [Int16] = (0..<n).map { i in
+        let env = min(Double(i) / attack, (Double(n) - Double(i)) / (Double(n) - attack))
+        return Int16(sin(2 * .pi * f * Double(i) / Double(rate)) * env * volume * 32767)
+    }
+    var d = Data()
+    func put<T: FixedWidthInteger>(_ v: T) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
+    d.append(contentsOf: "RIFF".utf8); put(UInt32(36 + samples.count * 2)); d.append(contentsOf: "WAVEfmt ".utf8)
+    put(UInt32(16)); put(UInt16(1)); put(UInt16(1)); put(UInt32(rate)); put(UInt32(rate * 2)); put(UInt16(2)); put(UInt16(16))
+    d.append(contentsOf: "data".utf8); put(UInt32(samples.count * 2)); samples.withUnsafeBufferPointer { d.append(Data(buffer: $0)) }   // Int16 is little-endian on every Mac
+    return NSSound(data: d)!
+}
+
+enum Sfx {
+    /// Talking blips: C5 D5 E5 F5 G5 A5, each repeated by how often it's picked (C, D, G, A most), one at random per blip.
+    static let blips = [(523.25, 3), (587.33, 4), (659.25, 1), (698.46, 1), (783.99, 3), (880.0, 3)]
+        .flatMap { f, w in Array(repeating: blipSound(f), count: w) }
+    static var on: Bool { UserDefaults.standard.object(forKey: "sound") as? Bool ?? true }
+    static func play(_ s: NSSound) { guard on else { return }; s.stop(); s.play() }
+}
+
 // MARK: sprite
 
 /// Sprite frames, one PNG each in a character's folder. closed/half/open are the mouth while talking; the rest are face poses.
@@ -604,7 +629,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { [weak self] _ in self?.tick() }
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.pollActivity() }
         pollActivity(); refreshSessions(); watchPermissionPrompts()
-        pollQueue.async { _ = claudeLaunch }   // resolve the claude path early, off the main thread
+        pollQueue.async { _ = claudeLaunch; _ = Sfx.blips }   // resolve the claude path and build the blips early, off main
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.say("Hello. Click me to chat.") }
     }
 
@@ -645,7 +670,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             anim.removeFirst()
             animStepEnd = t + (anim.first?.1 ?? 0)
         }
-        view.pose = anim.first?.0 ?? .closed
+        let pose = anim.first?.0 ?? .closed
+        if pose == .half && view.pose != .half && voiced {   // a blip every 0.18 s of talk
+            Sfx.play(Sfx.blips.randomElement()!)
+        }
+        view.pose = pose
         if anim.isEmpty && t >= nextIdle { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
     }
 
@@ -657,9 +686,16 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         guard !seq.isEmpty, anim.isEmpty || priority.rawValue >= animPriority.rawValue else { return }
         anim = seq; animPriority = priority; animStepEnd = t + seq[0].1
     }
-    func talking(_ steps: Int) -> [(Pose, Double)] {   // mouth flap, 90ms per frame
-        (0..<steps).map { ([Pose.closed, .half, .open, .half][$0 % 4], 0.09) }
+    /// Mouth flap for `text`, 90ms per frame, about one frame per two characters (capped), resting a moment at commas
+    /// and sentence ends.
+    func talking(_ text: String) -> [(Pose, Double)] {
+        let clauses = text.split(whereSeparator: { ",.!?;，。！？；、\n".contains($0) }).filter { !$0.allSatisfy(\.isWhitespace) }
+        let steps = min(8 + text.count / 2, 60), chars = max(1, clauses.reduce(0) { $0 + $1.count })
+        return clauses.enumerated().flatMap { i, c in
+            (i > 0 ? [(Pose.closed, 0.25)] : []) + (0..<max(4, steps * c.count / chars)).map { ([Pose.closed, .half, .open, .half][$0 % 4], 0.09) }
+        }
     }
+    var voiced = true   // the current talk makes blips
     let blink: [(Pose, Double)] = [(.blink_half, 0.05), (.blink_closed, 0.08), (.blink_half, 0.05)]
     lazy var idleActions: [(chance: Double, seq: [(Pose, Double)])] = [
         (0.06, [(.blink_half, 0.08), (.yawn, 1.4), (.blink_half, 0.1)]),                    // rare yawn
@@ -674,11 +710,16 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     /// Show `text` in the bubble for `hold` seconds (it also stays while the input is open or Claude is working),
     /// moving the mouth; `then` plays right after the talking.
-    func say(_ text: String, hold: TimeInterval? = nil, then: [(Pose, Double)] = []) {
+    func say(_ text: String, hold: TimeInterval? = nil, then: [(Pose, Double)] = [], voiced: Bool = true) {
+        self.voiced = voiced
         bubble.string = text; bubble.isHidden = false; layoutOverlays()
-        play(talking(min(8 + text.count / 2, 60)) + then, .talk)
+        play(talking(text) + then, .talk)
+        holdBubble(hold ?? max(4, Double(text.count) / 12))
+    }
+    /// Keep the bubble up for `hold` seconds (longer while the input is open or Claude is working).
+    func holdBubble(_ hold: TimeInterval) {
         bubbleTimer?.invalidate()
-        bubbleTimer = Timer.scheduledTimer(withTimeInterval: hold ?? max(4, Double(text.count) / 12), repeats: true) { [weak self] tm in
+        bubbleTimer = Timer.scheduledTimer(withTimeInterval: hold, repeats: true) { [weak self] tm in
             guard let self else { return }
             if self.agent.busy || !self.input.isHidden { return }   // check again next period
             self.hideBubble()
@@ -701,7 +742,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !agent.busy else { return true }
         input.stringValue = ""
-        agentStep = ""; say("·", hold: 3600); waiting = true
+        agentStep = ""; say("·", hold: 3600, voiced: false); waiting = true
         agent.send(text)
         refreshPill()
         return true
@@ -716,7 +757,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             pending.append((id, title, input)); showCard()
         case .done(let s):
             waiting = false; agentStep = ""
-            say(s.isEmpty ? bubble.string : s, hold: readTime(s.isEmpty ? bubble.string : s))
+            if s.isEmpty || s == bubble.string { holdBubble(readTime(bubble.string)) }   // already said by .text: let it finish
+            else { say(s, hold: readTime(s)) }
         case .failed(let s): waiting = false; agentStep = ""; say(s)
         }
         refreshPill()
@@ -870,6 +912,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         }
         let top = m.addItem(withTitle: "Always on top", action: #selector(toggleTop(_:)), keyEquivalent: "")
         top.state = window.level == .floating ? .on : .off
+        m.addItem(withTitle: "Sound effects", action: #selector(toggleSound(_:)), keyEquivalent: "").state = Sfx.on ? .on : .off
         m.addItem(withTitle: "Character", action: nil, keyEquivalent: "").submenu = characterMenu
         m.addItem(withTitle: "Hide / Show", action: #selector(toggleShow), keyEquivalent: "")
         m.addItem(.separator())
@@ -941,6 +984,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.level = window.level == .floating ? .normal : .floating
         s.state = window.level == .floating ? .on : .off
         UserDefaults.standard.set(window.level == .floating, forKey: "onTop")
+    }
+    @objc func toggleSound(_ s: NSMenuItem) {
+        UserDefaults.standard.set(!Sfx.on, forKey: "sound"); s.state = Sfx.on ? .on : .off
     }
     @objc func pickCharacter(_ item: NSMenuItem) {
         guard let dir = item.representedObject as? URL, let s = Sprite(dir) else { return say("I can't open that one.") }
