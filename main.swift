@@ -254,13 +254,18 @@ func resumeInTerminal(_ s: Session) {
 // (the same protocol the IDE extensions use; tool permission requests arrive as control_request can_use_tool)
 
 /// `claude`'s path and the PATH it needs, as the user's interactive shell sees them (resolved once; GUI apps get a bare PATH).
-let claudeLaunch: (exe: String, path: String)? = {
-    let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-    p.arguments = ["-ilc", "print -r -- \"$PATH\"; command -v claude"]
-    let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+/// Runs `exe` and returns its exit status and stdout (stderr is dropped), or nil if it can't start. Blocks.
+func runTool(_ exe: String, _ args: [String]) -> (status: Int32, out: Data)? {
+    let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = args
+    let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
     guard (try? p.run()) != nil else { return nil }
-    p.waitUntilExit()
-    let lines = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").map(String.init)
+    let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()   // read first: a full pipe blocks the exit
+    return (p.terminationStatus, data)
+}
+
+let claudeLaunch: (exe: String, path: String)? = {
+    guard let r = runTool("/bin/zsh", ["-ilc", "print -r -- \"$PATH\"; command -v claude"]) else { return nil }
+    let lines = String(decoding: r.out, as: UTF8.self).split(separator: "\n").map(String.init)
     guard lines.count >= 2, let exe = lines.last, exe.hasPrefix("/") else { return nil }
     return (exe, lines[lines.count - 2])
 }()
@@ -435,19 +440,19 @@ func keychainService(_ dir: URL) -> String {
 }
 
 /// Fetches the plan limits for one account; `done` runs on a background queue. Best-effort: this reads Claude Code's
-/// private credential layout and an undocumented endpoint. The first keychain read asks the user to allow it.
+/// private credential layout and an undocumented endpoint.
 func planLimits(_ dir: URL, done: @escaping (Result<[Limit], LimitError>) -> Void) {
-    // account = the user name, as Claude Code stores it; older stray items with other accounts can share the service name
-    let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: keychainService(dir),
-                            kSecAttrAccount as String: ProcessInfo.processInfo.environment["USER"] ?? NSUserName(),
-                            kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
-    var item: CFTypeRef?
-    let found = SecItemCopyMatching(q as CFDictionary, &item)
-    guard found != errSecItemNotFound else { return done(.failure(LimitError(text: "no login found"))) }
-    guard found == errSecSuccess, let data = item as? Data,
-          let creds = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+    // Read through /usr/bin/security, as Claude Code does: the item trusts that tool, so there's no prompt. Reading it
+    // directly asks again whenever Claude Code rewrites the item on a token refresh, even after "Always Allow".
+    // Account = the user name, as Claude Code stores it; stray items with other accounts can share the service name.
+    let user = ProcessInfo.processInfo.environment["USER"] ?? NSUserName()
+    guard let r = runTool("/usr/bin/security", ["find-generic-password", "-a", user, "-s", keychainService(dir), "-w"]) else {
+        return done(.failure(LimitError(text: "can't run security")))
+    }
+    guard r.status != 44 else { return done(.failure(LimitError(text: "no login found"))) }   // errSecItemNotFound
+    guard r.status == 0, let creds = (try? JSONSerialization.jsonObject(with: r.out)) as? [String: Any],
           let token = (creds["claudeAiOauth"] as? [String: Any])?["accessToken"] as? String else {
-        return done(.failure(LimitError(text: "can't read login (\(found))")))
+        return done(.failure(LimitError(text: "can't read login (\(r.status))")))
     }
     var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, timeoutInterval: 10)
     req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
