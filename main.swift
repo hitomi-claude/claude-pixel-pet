@@ -163,6 +163,7 @@ final class PetView: NSView {
     var spriteHeight: CGFloat = 240
     var pose = Pose.closed { didSet { if pose != oldValue { needsDisplay = true } } }
     var bob: CGFloat = 0 { didSet { if bob != oldValue { needsDisplay = true } } }   // whole pixels only
+    var fade: CGFloat = 1 { didSet { if fade != oldValue { needsDisplay = true } } }  // sprite opacity
     var onClick: (() -> Void)?
     var onMoved: (() -> Void)?
     var onRightClick: (() -> Void)?
@@ -177,7 +178,7 @@ final class PetView: NSView {
     }
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.current?.imageInterpolation = .high
-        sprite.frames[pose]!.draw(in: spriteRect)
+        sprite.frames[pose]!.draw(in: spriteRect, from: .zero, operation: .sourceOver, fraction: fade)
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
         let p = convert(point, from: superview)
@@ -608,6 +609,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     let headroom: CGFloat = 230
     let sizes: [(String, CGFloat)] = [("Small", 160), ("Medium", 240), ("Large", 340)]
     var height: CGFloat { CGFloat(UserDefaults.standard.object(forKey: "height") as? Double ?? 240) }
+    var fadeOnHover = UserDefaults.standard.bool(forKey: "fadeOnHover")
     let relative: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f }()
     var sigterm: DispatchSourceSignal?
 
@@ -694,6 +696,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         }
         typeStep()
         view.pose = anim.first?.0 ?? .closed
+        // see-through on hover: ease towards 30% in about half a second, and back
+        let hover = fadeOnHover && view.spriteRect.contains(view.convert(window.mouseLocationOutsideOfEventStream, from: nil))
+        let target: CGFloat = hover ? 0.3 : 1
+        view.fade = abs(target - view.fade) < 0.01 ? target : view.fade + (target - view.fade) * 0.2
         if anim.isEmpty && t >= nextIdle { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
     }
 
@@ -940,6 +946,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         }
         let top = m.addItem(withTitle: "Always on top", action: #selector(toggleTop(_:)), keyEquivalent: "")
         top.state = window.level == .floating ? .on : .off
+        m.addItem(withTitle: "See-through on hover", action: #selector(toggleFade(_:)), keyEquivalent: "").state = fadeOnHover ? .on : .off
         m.addItem(withTitle: "Voice", action: nil, keyEquivalent: "").submenu = voiceMenu
         for (i, v) in Voice.allCases.enumerated() {
             let it = voiceMenu.addItem(withTitle: v.title, action: #selector(pickVoice(_:)), keyEquivalent: "")
@@ -1016,6 +1023,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.level = window.level == .floating ? .normal : .floating
         s.state = window.level == .floating ? .on : .off
         UserDefaults.standard.set(window.level == .floating, forKey: "onTop")
+    }
+    @objc func toggleFade(_ s: NSMenuItem) {
+        fadeOnHover.toggle(); s.state = fadeOnHover ? .on : .off
+        UserDefaults.standard.set(fadeOnHover, forKey: "fadeOnHover")
     }
     @objc func pickVoice(_ s: NSMenuItem) {
         voice = Voice.allCases[s.tag]; UserDefaults.standard.set(voice.rawValue, forKey: "voice")
