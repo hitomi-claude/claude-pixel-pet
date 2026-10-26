@@ -18,21 +18,25 @@ src = Image.open(args.sprite).convert("RGBA")
 k = src.height / 600
 head = src.crop((round(40 * k), 0, round(320 * k), round(280 * k)))   # whole head, sunflower, ribbon, book, down to the chest
 
-W, inset, radius = 1024, 100, 185
-size = W - 2 * inset
 top, bottom = np.array([52, 58, 86, 255]), np.array([24, 27, 44, 255])   # navy, like the channel's video backgrounds
-g = np.linspace(0, 1, size)[:, None, None]
-plate = Image.fromarray(np.broadcast_to(top * (1 - g) + bottom * g, (size, size, 4)).astype(np.uint8))
-art = head.resize((round(size * .96),) * 2, Image.LANCZOS)
-plate.alpha_composite(art, ((size - art.width) // 2, size - art.height))   # sits on the bottom edge
-mask = Image.new("L", (size, size), 0); ImageDraw.Draw(mask).rounded_rectangle((0, 0, size - 1, size - 1), radius, fill=255)
-icon = Image.new("RGBA", (W, W), (0, 0, 0, 0)); icon.paste(plate, (inset, inset), mask)
-if args.png: icon.save(args.png)
 
-with tempfile.TemporaryDirectory() as tmp:
+def render(W):   # the icon at W px: Apple's grid scaled from 1024 (100 px inset, 185 px corners)
+    inset, radius = round(W * 100 / 1024), round(W * 185 / 1024)
+    size = W - 2 * inset
+    g = np.linspace(0, 1, size)[:, None, None]
+    plate = Image.fromarray(np.broadcast_to(top * (1 - g) + bottom * g, (size, size, 4)).astype(np.uint8))
+    art = head.resize((round(size * .96),) * 2, Image.LANCZOS)
+    if W >= 64: art = art.quantize(256, method=Image.Quantize.FASTOCTREE).convert("RGBA")   # resampling leaves ~170k colours
+    plate.alpha_composite(art, ((size - art.width) // 2, size - art.height))   # sits on the bottom edge
+    mask = Image.new("L", (size, size), 0); ImageDraw.Draw(mask).rounded_rectangle((0, 0, size - 1, size - 1), radius, fill=255)
+    icon = Image.new("RGBA", (W, W), (0, 0, 0, 0)); icon.paste(plate, (inset, inset), mask)
+    return icon
+
+if args.png: render(1024).save(args.png)
+with tempfile.TemporaryDirectory() as tmp:   # each size drawn at its own resolution: a downscaled 1024 brings the colours back
     iconset = Path(tmp) / "AppIcon.iconset"; iconset.mkdir()
     for pt in (16, 32, 128, 256, 512):
         for scale in (1, 2):
-            icon.resize((pt * scale,) * 2, Image.LANCZOS).save(iconset / f"icon_{pt}x{pt}{'@2x' if scale == 2 else ''}.png")
+            render(pt * scale).save(iconset / f"icon_{pt}x{pt}{'@2x' if scale == 2 else ''}.png", optimize=True)
     subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", args.out], check=True)
 print("wrote", args.out)
