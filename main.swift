@@ -113,10 +113,15 @@ enum Sfx {
 
 // MARK: sprite
 
-/// Sprite frames, one PNG each in a character's folder. closed/half/open are the mouth while talking; the rest are face poses.
+/// Sprite frames, one PNG each in a character's folder. closed/half/open are the mouth while talking, then face poses,
+/// then full-body poses (sleep, work, stretch), which may be bigger than closed.png.
 enum Pose: String, CaseIterable {
-    case closed, half, open, blink_half, blink_closed, read, yawn, smile, surprised
+    case closed, half, open, blink_half, blink_closed, read, yawn, smile, surprised, sleep, work, stretch
     func png(in dir: URL) -> URL { dir.appendingPathComponent("\(rawValue).png") }
+    var standIn: Pose? {   // shown when a character lacks this full-body pose
+        switch self { case .sleep: .blink_closed; case .work: .read; case .stretch: .yawn; default: nil }
+    }
+    var body: Pose { standIn == nil ? .closed : self }   // the full-body pose; face frames all stand
 }
 
 /// Characters: Claude (Resources/ in the app), the outfits in Resources/Characters, then each folder in
@@ -135,13 +140,16 @@ func characters() -> [(name: String, dir: URL)] {
 
 final class Sprite {
     let frames: [Pose: NSImage]
+    let size: [Pose: CGSize]   // each frame's size relative to closed.png; full-body poses can be bigger (raised arms)
     let aspect: CGFloat
     private let w: Int, h: Int, mask: [Bool]   // opaque pixels of the neutral frame, for click-through
     init?(_ dir: URL) {
         guard let base = NSImage(contentsOf: Pose.closed.png(in: dir)),
               let cg = base.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, NSImage(contentsOf: $0.png(in: dir)) ?? base) })
+        let own = Dictionary(uniqueKeysWithValues: Pose.allCases.compactMap { p in NSImage(contentsOf: p.png(in: dir)).map { (p, $0) } })
+        frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, own[$0] ?? $0.standIn.flatMap { own[$0] } ?? base) })
         w = cg.width; h = cg.height; aspect = CGFloat(w) / CGFloat(h)
+        size = frames.mapValues { im in im.representations.first.map { CGSize(width: CGFloat($0.pixelsWide) / CGFloat(cg.width), height: CGFloat($0.pixelsHigh) / CGFloat(cg.height)) } ?? CGSize(width: 1, height: 1) }
         var alpha = [UInt8](repeating: 0, count: w * h)   // draw into an alpha-only buffer: one pass, no per-pixel objects
         let ctx = CGContext(data: &alpha, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
                             space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue)!
@@ -167,6 +175,7 @@ final class PetView: NSView {
     var onClick: (() -> Void)?
     var onMoved: (() -> Void)?
     var onRightClick: (() -> Void)?
+    var onTouch: (() -> Void)?   // any click or drag
     private var dragStart: NSPoint?, moved = false
 
     init(sprite: Sprite) { self.sprite = sprite; super.init(frame: .zero) }
@@ -178,7 +187,9 @@ final class PetView: NSView {
     }
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.current?.imageInterpolation = .high
-        sprite.frames[pose]!.draw(in: spriteRect, from: .zero, operation: .sourceOver, fraction: fade)
+        let r = spriteRect, k = sprite.size[pose]!   // same scale and bottom centre as closed.png
+        sprite.frames[pose]!.draw(in: NSRect(x: r.midX - r.width * k.width / 2, y: r.minY, width: r.width * k.width, height: r.height * k.height),
+                                  from: .zero, operation: .sourceOver, fraction: fade)
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
         let p = convert(point, from: superview)
@@ -188,7 +199,7 @@ final class PetView: NSView {
         return sprite.opaque(atUnit: CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)) ? self : nil
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with e: NSEvent) { dragStart = e.locationInWindow; moved = false }
+    override func mouseDown(with e: NSEvent) { onTouch?(); dragStart = e.locationInWindow; moved = false }
     override func mouseDragged(with e: NSEvent) {
         guard let start = dragStart, let w = window else { return }
         let p = NSEvent.mouseLocation
@@ -198,7 +209,7 @@ final class PetView: NSView {
         if moved { onMoved?() } else { onClick?() }
         dragStart = nil
     }
-    override func rightMouseDown(with e: NSEvent) { onRightClick?() }
+    override func rightMouseDown(with e: NSEvent) { onTouch?(); onRightClick?() }
 }
 
 // MARK: Claude Code activity + usage, read from ~/.claude*/projects/**/*.jsonl
@@ -629,6 +640,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }
+        view.onTouch = { [weak self] in self?.poke() }
         view.onRightClick = { [weak self] in self?.toggleUsagePanel() }
         window.contentView = view
         input.isHidden = true; input.delegate = self
@@ -695,12 +707,23 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             animStepEnd += anim.first?.1 ?? 0
         }
         typeStep()
-        view.pose = anim.first?.0 ?? .closed
+        let want = anim.first?.0 ?? (asleep ? .sleep : .closed)
+        if want.body == view.pose.body { view.pose = want }
+        else if t - bodySince >= bodyHold { view.pose = want; bodySince = t }   // the sequence runs on meanwhile: frames can be skipped
         // see-through on hover: ease towards 30% in about half a second, and back
         let hover = fadeOnHover && view.spriteRect.contains(view.convert(window.mouseLocationOutsideOfEventStream, from: nil))
         let target: CGFloat = hover ? 0.3 : 1
         view.fade = abs(target - view.fade) < 0.01 ? target : view.fade + (target - view.fade) * 0.2
-        if anim.isEmpty && t >= nextIdle { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
+        if anim.isEmpty && t >= nextIdle && !asleep { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
+    }
+    // dozes off after 5 minutes without a click, a word or a busy Claude Code session; poke() wakes her with a stretch
+    // a full-body pose stays up at least bodyHold seconds, so she doesn't flicker between them
+    var lastActive = 0.0, bodySince = 0.0
+    let bodyHold = 1.0, wake: [(Pose, Double)] = [(.stretch, 1.6), (.blink_half, 0.1)]
+    var asleep: Bool { t - lastActive > 300 }
+    func poke() {
+        if asleep { play(wake, .expression) }
+        lastActive = t
     }
 
     // pixel animation: one sequence of (pose, seconds) at a time, stepped by tick(); then back to the neutral face.
@@ -735,7 +758,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         (0.10, blink + [(.closed, 0.15)] + blink),                                          // double blink
         (0.70, blink),
     ]
-    func idleAnimation() {   // pick one idle action by its chance
+    func idleAnimation() {   // pick one idle action by its chance; mostly writing while Claude Code works
+        if (agent.busy || !otherActivity.isEmpty) && Double.random(in: 0..<1) < 0.6 { play([(.work, .random(in: 3...6))], .idle); return }
         var r = Double.random(in: 0..<1)
         for a in idleActions { r -= a.chance; if r < 0 { play(a.seq, .idle); return } }
     }
@@ -745,9 +769,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     func say(_ text: String, hold: TimeInterval? = nil, then: [(Pose, Double)] = [], voiced: Bool = true) {
         let full = Array(text), step = min(0.09, 5 / Double(max(full.count, 1)))
         let flap = full.enumerated().map { i, c in (pauses.contains(c) ? Pose.closed : [.half, .open, .half, .closed][i % 4], pauseAfter(c, step: step)) }
+        let woke = asleep; poke()   // the talk replaces poke's stretch: stretch once she's said it
         sayText = text; bubble.string = ""; bubble.isHidden = false
         typing = (full, 0, t, step, voiced)
-        play(flap + then, .talk)
+        play(flap + (woke ? wake : []) + then, .talk)
         holdBubble((hold ?? max(4, Double(text.count) / 12)) + flap.reduce(0) { $0 + $1.1 })
     }
     /// Keep the bubble up for `hold` seconds (longer while the input is open or Claude is working).
@@ -864,8 +889,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let working = fresh && (act?.working ?? false)
         otherActivity = working ? "\(act!.project): \(act!.detail)" : ""
         if wasWorking && !working, let a = act, fresh, a.last.timeIntervalSince(a.since) > 20, !agent.busy {
-            say("Done in \(a.project). Your turn.", then: [(.smile, 2.5)])
+            say("Done in \(a.project). Your turn.", then: [(.stretch, 1.6), (.smile, 2.5)])
         }
+        if working || agent.busy { poke() }
         wasWorking = working
         refreshPill()
         var lines = rows.map { "\($0.label): \(shortCount($0.usage.output)) out · \(shortCount($0.usage.input)) in · \($0.usage.sessions) sessions" }

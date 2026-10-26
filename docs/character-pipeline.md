@@ -6,9 +6,10 @@ How the sprites in `Resources/` were made, written so it works for other charact
 original art ──(1) 3 heads tall──(2) pixelize──┐
                                                ├─(4) cutout ─(5) face frames ─(6) check in the app
 base sprite ──────(3) change the outfit────────┘
+base sprite ──────(7) full-body poses ── cutout ── fit to closed.png ──┘
 ```
 
-Steps 1 to 3 use `qwen-image-3.0` through DashScope (`gen/aliyun_img.py` in claude-bili, key in `~/.config/claude-bili/keys.env`; never print or commit it). Steps 4 and 5 are scripts in `tools/` (Python 3 with Pillow, NumPy, SciPy). The art and everything made from it is ZipZipPipe's, CC BY-NC-SA 4.0: no commercial use, keep the credit.
+Steps 1 to 3 use `qwen-image-3.0` through DashScope (`gen/aliyun_img.py` in claude-bili, key in `~/.config/claude-bili/keys.env`; never print or commit it). Steps 4, 5 and 7 use scripts in `tools/` (Python 3 with Pillow, NumPy, SciPy; `fit_frame.py` also OpenCV). The art and everything made from it is ZipZipPipe's, CC BY-NC-SA 4.0: no commercial use, keep the credit.
 
 ## 1. Three heads tall (new character only)
 
@@ -68,3 +69,35 @@ For a different character, make its reference set first (a closed-mouth `closed.
 ## 6. Check
 
 Put the folder in `Resources/Characters/` (built in, run `./build.sh`) or use "Add Character…", pick it in the Character menu, and watch it talk, blink and idle. Without the step 5 frames a character still works but never moves its face.
+
+## 7. Full-body poses
+
+`sleep.png`, `work.png` and `stretch.png` change the arms and the head, so they are generated, not pasted. Edit the white-background image that `closed.png` was cut from (for Claude: the pixel base sprite, halved), **padded with white above the head and on both sides** (Claude: 320 px above, 200 px each side on the 880×1176 image). Without that room the model makes space for the arms and the book by shrinking or narrowing the figure. One pose per request, two variants each:
+
+```
+只修改姿势和表情：【姿势】。其他全部保持不变：同一个角色的脸、【发型发色】、【发饰、耳坠】、全部服装（【衣服，从上到下】）、三头身比例、人物在画面中的大小、宽度和位置（双脚位置不变，伸出的手臂和书伸进周围的空白处），保持高分辨率像素画（pixel art）风格和清晰的像素边缘，纯白色背景，不要文字。
+```
+negative: `改变脸, 改变发型, 改变发色, 改变服装, 改变比例, 缩小人物, 人物变瘦, 写实, 模糊, 文字, 水印, 多余的手, 多余的手指`
+
+Poses used for Claude:
+- sleep: 角色站着打瞌睡，头微微向一侧低垂，双眼轻轻闭合，嘴巴闭合，表情安详，双手把书抱在胸前
+- work: 角色低头专注地看着摊开的书，一只手托着打开的书，另一只手拿着羽毛笔在书页上写字，嘴巴闭合，表情认真平静. The model keeps her eyes on the viewer anyway, so `read.png`'s downcast eyes are pasted on afterwards (below).
+- stretch: 角色双臂举过头顶伸懒腰，书拿在举起的一只手里，双眼闭合，嘴巴微张像在打哈欠，表情放松
+
+Then cut out, clean the hair gaps at full resolution, line up with `closed.png`:
+
+```sh
+python3 tools/cutout.py work_raw.png work_cut.png --white 246
+python3 tools/fit_frame.py Resources/closed.png work_cut.png work.png --preview check.png   # also prints the face box for the next line
+python3 tools/defringe.py work_cut.png work_cut.png --face <printed box>
+python3 tools/fit_frame.py Resources/closed.png work_cut.png work.png --preview check.png
+python3 tools/face_frames.py work.png --only read --fit 1,<ext>,<top> --out tmp/ && mv tmp/read.png Resources/work.png
+```
+
+Clean before scaling down: at 600 px the leftover white blends into light orange and defringe no longer sees it. `cutout.py` gives the soft edge the colour of the solid pixels next to it (otherwise the background's white stays in it as a rim around the hair) and removes enclosed white gaps of any size that sit in hair.
+
+`fit_frame.py` finds the head mark (`--mark`, Claude's sunflower by default) and the soles, scales the pose so the distance between them matches `closed.png`, and puts the soles and the middle of the feet where `closed.png` has them. It prints the mark's match: much above 40 means it wasn't found (it happened once, on a stretch variant; use the other one). `check.png` shows `closed.png` faintly over the pose: head and shoes should sit on it. `ext` and `top` are how much the canvas grew on each side and on top (`(width − 359) / 2` and `height − 600` for Claude); `--fit` tells face_frames the face is already in place.
+
+Lining up on the source image instead (assuming the edit keeps the layout) worked only without padding, and matching on the skirt hem, shoes or head colours alone was unreliable: each edit redraws them a little differently.
+
+Check the result on magenta and on near-black: white left between hair strands is easy to miss on dark grey, and a white rim shows on a dark desktop.
