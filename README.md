@@ -27,6 +27,16 @@ A small pixel-art Claude that lives on your macOS desktop. You can chat with it,
 - **Usage.** The menu-bar ✦ shows today's output tokens. The menu breaks usage down per account (output, input including cache, number of sessions) and shows the context size of the latest session.
 - **Usage panel.** Right-click the pet for a panel with your plan limits per account (5-hour and weekly, with Opus / Sonnet when your plan has them), the same percentages and reset times as `/usage` in Claude Code, plus today's tokens and what is running now. It reads Claude Code's login from the keychain the same way Claude Code does (with the `security` tool), so there is no keychain prompt.
 - **Pixel animation.** She blinks every few seconds. Now and then she reads her book, and very rarely she yawns. She smiles when a Claude Code task finishes. Every pose is a full pixel-art frame with only the eyes and mouth changed, so nothing gets stretched.
+- **Characters.** Pick one under Character in the menu: Claude, or Claude in a winter outfit (white fur hat) or a summer one (one still frame each, so no blinking or mouth movement yet). Add your own with **Add Character…**: choose a folder laid out as below and it is copied into `~/Library/Application Support/ClaudePet/Characters/` ("Open Characters Folder…" shows it). Characters stay on your Mac, so art you can't share works too.
+
+  ```
+  My Character/          the folder name is the character's name
+    closed.png           required: the neutral frame, transparent background
+    half.png  open.png   mouth half / fully open while talking
+    blink_half.png  blink_closed.png
+    read.png  yawn.png  smile.png  surprised.png
+  ```
+  Every PNG but `closed.png` is optional; a missing one shows `closed.png`. Use frames of the same size, with only the face changed, so nothing jumps.
 - Drag the pet to move it. The transparent area around the character is click-through. Sizes are Small, Medium and Large. It can stay on top, shows on every desktop, and has no Dock icon.
 
 Activity and today's tokens come from reading the local transcripts in `~/.claude/projects/**/*.jsonl`. The only network traffic is the chat, which goes through your own `claude` CLI, and, while the usage panel is open, at most one request a minute per account to `api.anthropic.com/api/oauth/usage` (the endpoint Claude Code's own `/usage` calls) with that account's login. The token is read from the keychain and not stored anywhere else. That endpoint is undocumented, so the plan limits can stop working after a Claude Code update.
@@ -68,7 +78,7 @@ Sessions the pet runs itself don't need it: their permission requests already po
 |---|---|
 | `main.swift` | the whole app (AppKit, no dependencies) |
 | `build.sh` | compiles with `swiftc` and packages the `.app` |
-| `Resources/` | sprite frames: mouth closed / half / open, plus face poses (blinks, reading, yawn, smile, surprised) |
+| `Resources/` | sprite frames: mouth closed / half / open, plus face poses (blinks, reading, yawn, smile, surprised); `Characters/<name>/` holds the outfits |
 | `tools/defringe.py` | cleans leftover white background out of the hair in a cut-out sprite; `--face` protects a region, `--fill-face-holes` repairs punched-out eye whites (numpy, scipy, Pillow) |
 
 ## License

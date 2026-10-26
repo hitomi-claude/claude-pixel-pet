@@ -5,6 +5,7 @@ import AppKit
 import CryptoKit
 
 let home = FileManager.default.homeDirectoryForCurrentUser
+let appSupport = home.appendingPathComponent("Library/Application Support/ClaudePet")   // characters, hook events
 // Claude Code config dirs whose transcripts are watched; the first one is also used for chat.
 // Default ~/.claude; override for several accounts:
 //   defaults write io.github.kirigirihitomi.claude-pixel-pet configDirs -array ~/.claude-work ~/.claude
@@ -65,17 +66,34 @@ func shortCount(_ n: Int) -> String { n >= 1_000_000 ? String(format: "%.1fM", D
 
 // MARK: sprite
 
-/// Sprite frames, one PNG each in Resources/. closed/half/open are the mouth while talking; the rest are face poses.
-enum Pose: String, CaseIterable { case closed, half, open, blink_half, blink_closed, read, yawn, smile, surprised }
+/// Sprite frames, one PNG each in a character's folder. closed/half/open are the mouth while talking; the rest are face poses.
+enum Pose: String, CaseIterable {
+    case closed, half, open, blink_half, blink_closed, read, yawn, smile, surprised
+    func png(in dir: URL) -> URL { dir.appendingPathComponent("\(rawValue).png") }
+}
+
+/// Characters: Claude (Resources/ in the app), the outfits in Resources/Characters, then each folder in
+/// Application Support/ClaudePet/Characters. A character needs closed.png; a pose without its own PNG shows that.
+let charactersDir = appSupport.appendingPathComponent("Characters")
+func characters() -> [(name: String, dir: URL)] {
+    func folders(_ dir: URL) -> [(name: String, dir: URL)] {
+        ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { FileManager.default.fileExists(atPath: Pose.closed.png(in: $0).path) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            .map { ($0.lastPathComponent, $0) }
+    }
+    let res = Bundle.main.resourceURL!
+    return [("Claude", res)] + folders(res.appendingPathComponent("Characters")) + folders(charactersDir)
+}
 
 final class Sprite {
     let frames: [Pose: NSImage]
     let aspect: CGFloat
     private let w: Int, h: Int, mask: [Bool]   // opaque pixels of the neutral frame, for click-through
-    init() {
-        let res = Bundle.main.resourceURL!
-        frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, NSImage(contentsOf: res.appendingPathComponent("\($0.rawValue).png"))!) })
-        let cg = frames[.closed]!.cgImage(forProposedRect: nil, context: nil, hints: nil)!
+    init?(_ dir: URL) {
+        guard let base = NSImage(contentsOf: Pose.closed.png(in: dir)),
+              let cg = base.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, NSImage(contentsOf: $0.png(in: dir)) ?? base) })
         w = cg.width; h = cg.height; aspect = CGFloat(w) / CGFloat(h)
         var alpha = [UInt8](repeating: 0, count: w * h)   // draw into an alpha-only buffer: one pass, no per-pixel objects
         let ctx = CGContext(data: &alpha, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
@@ -94,7 +112,7 @@ final class PetWindow: NSWindow {
 }
 
 final class PetView: NSView {
-    let sprite: Sprite
+    var sprite: Sprite { didSet { needsDisplay = true } }
     var spriteHeight: CGFloat = 240
     var pose = Pose.closed { didSet { if pose != oldValue { needsDisplay = true } } }
     var bob: CGFloat = 0 { didSet { if bob != oldValue { needsDisplay = true } } }   // whole pixels only
@@ -177,7 +195,7 @@ final class Monitor {
     }
 
     /// Where the Claude Code PermissionRequest hook appends its input, one JSON object per line (see README).
-    static let hookFile = home.appendingPathComponent("Library/Application Support/ClaudePet/events.jsonl")
+    static let hookFile = appSupport.appendingPathComponent("events.jsonl")
     private var hookState: FileState?   // nil until the first call, which skips what was there before launch
     private var ask: (session: String, at: Date)?   // the prompt the bubble shows, until its session moves on
     enum AskChange { case show(project: String, tool: String), hide }
@@ -505,7 +523,7 @@ func planLimits(_ dir: URL, done: @escaping (Result<[Limit], LimitError>) -> Voi
 // MARK: app
 
 final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDelegate {
-    let sprite = Sprite(), monitor = Monitor()
+    let monitor = Monitor()
     var window: PetWindow!, view: PetView!, status: NSStatusItem!
     let bubble = BubbleView(), card = PermissionCard(), input = NSTextField()
     let statusPill: NSTextField = {
@@ -558,7 +576,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.level = UserDefaults.standard.object(forKey: "onTop") as? Bool ?? true ? .floating : .normal
-        view = PetView(sprite: sprite)
+        view = PetView(sprite: characters().first { $0.name == UserDefaults.standard.string(forKey: "character") }
+            .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }
         view.onRightClick = { [weak self] in self?.toggleUsagePanel() }
@@ -590,7 +609,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
 
     func resize(_ h: CGFloat, keepBottom: Bool = true) {
-        let w = max(h * sprite.aspect, 300), total = h + headroom
+        let w = max(h * view.sprite.aspect, 300), total = h + headroom
         let origin: NSPoint
         if keepBottom { origin = NSPoint(x: window.frame.midX - w / 2, y: window.frame.minY) }
         else { let v = NSScreen.main!.visibleFrame; origin = NSPoint(x: v.maxX - w - 40, y: v.minY + 10) }
@@ -828,7 +847,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     // menu
     var usageItems: [NSMenuItem] = []
-    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu()
+    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), characterMenu = NSMenu()
     var sessions: [Session] = []
     func refreshSessions() {   // off the main thread; the submenus show the last result
         pollQueue.async { let s = recentSessions(); DispatchQueue.main.async { self.sessions = s } }
@@ -844,13 +863,14 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         m.addItem(withTitle: "Switch session", action: nil, keyEquivalent: "").submenu = switchMenu
         m.addItem(withTitle: "Stop", action: #selector(stopAgent), keyEquivalent: "")
         m.addItem(withTitle: "Open in Terminal", action: nil, keyEquivalent: "").submenu = terminalMenu
-        switchMenu.delegate = self; terminalMenu.delegate = self
+        switchMenu.delegate = self; terminalMenu.delegate = self; characterMenu.delegate = self
         m.addItem(.separator())
         for (i, (name, _)) in sizes.enumerated() {
             let it = m.addItem(withTitle: name, action: #selector(pickSize(_:)), keyEquivalent: ""); it.tag = i
         }
         let top = m.addItem(withTitle: "Always on top", action: #selector(toggleTop(_:)), keyEquivalent: "")
         top.state = window.level == .floating ? .on : .off
+        m.addItem(withTitle: "Character", action: nil, keyEquivalent: "").submenu = characterMenu
         m.addItem(withTitle: "Hide / Show", action: #selector(toggleShow), keyEquivalent: "")
         m.addItem(.separator())
         m.addItem(withTitle: "About", action: #selector(about), keyEquivalent: "")
@@ -861,6 +881,18 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === characterMenu {   // folders may have been added since the last look
+            menu.removeAllItems()
+            let current = UserDefaults.standard.string(forKey: "character") ?? "Claude"
+            for c in characters() {
+                let it = menu.addItem(withTitle: c.name, action: #selector(pickCharacter(_:)), keyEquivalent: "")
+                it.target = self; it.representedObject = c.dir; it.state = c.name == current ? .on : .off
+            }
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Add Character…", action: #selector(addCharacter), keyEquivalent: "").target = self
+            menu.addItem(withTitle: "Open Characters Folder…", action: #selector(openCharacters), keyEquivalent: "").target = self
+            return
+        }
         if menu === status.menu {
             sessionLabel.title = "Talking to: \(agent.target.name)\(agent.target.tools ? "" : " (no tools)")"
             refreshSessions(); return
@@ -892,10 +924,13 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let s = sessions[item.tag]
         switchTo(Target(id: s.id, cwd: s.cwd, dir: s.dir, tools: true, name: s.label))
     }
-    @objc func newSessionInFolder() {
-        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
+    func pickFolder(_ message: String? = nil) -> URL? {
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.message = message ?? ""
         NSApp.activate(ignoringOtherApps: true)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+    @objc func newSessionInFolder() {
+        guard let url = pickFolder() else { return }
         switchTo(Target(id: nil, cwd: url.path, dir: accounts.first?.dir, tools: true, name: url.lastPathComponent))
     }
     @objc func openInTerminal(_ item: NSMenuItem) { resumeInTerminal(sessions[item.tag]) }
@@ -906,6 +941,35 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.level = window.level == .floating ? .normal : .floating
         s.state = window.level == .floating ? .on : .off
         UserDefaults.standard.set(window.level == .floating, forKey: "onTop")
+    }
+    @objc func pickCharacter(_ item: NSMenuItem) {
+        guard let dir = item.representedObject as? URL, let s = Sprite(dir) else { return say("I can't open that one.") }
+        switchCharacter(item.title, s)
+    }
+    func switchCharacter(_ name: String, _ s: Sprite) {
+        UserDefaults.standard.set(name, forKey: "character")
+        view.sprite = s; resize(height)
+    }
+    /// Copies a chosen folder into the characters folder (named after it) and switches to it. It needs closed.png;
+    /// the other poses are optional (see README).
+    @objc func addCharacter() {
+        guard let src = pickFolder("A folder with closed.png (and optionally half, open, blink_half, blink_closed, read, yawn, smile, surprised .png)") else { return }
+        guard let s = Sprite(src) else { return say("That folder needs a closed.png, the neutral frame.") }
+        let fm = FileManager.default, taken = Set(characters().map(\.name))
+        var name = src.lastPathComponent, n = 2
+        while taken.contains(name) || fm.fileExists(atPath: charactersDir.appendingPathComponent(name).path) { name = "\(src.lastPathComponent) \(n)"; n += 1 }
+        let dst = charactersDir.appendingPathComponent(name)
+        let present = Pose.allCases.filter { fm.fileExists(atPath: $0.png(in: src).path) }
+        do {
+            try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+            for p in present { try fm.copyItem(at: p.png(in: src), to: p.png(in: dst)) }
+        } catch { return say("I couldn't copy it: \(error.localizedDescription)") }
+        switchCharacter(name, s)
+        say("Added \(name): \(present.count) of \(Pose.allCases.count) frames.")
+    }
+    @objc func openCharacters() {
+        try? FileManager.default.createDirectory(at: charactersDir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(charactersDir)
     }
     @objc func toggleShow() { window.isVisible ? window.orderOut(nil) : window.orderFrontRegardless() }
     @objc func about() {

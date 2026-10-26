@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 APP=build/ClaudePet.app
 rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -o "$APP/Contents/MacOS/ClaudePet" main.swift
-cp Resources/*.png "$APP/Contents/Resources/"
+cp -R Resources/ "$APP/Contents/Resources/"   # sprite frames, plus Characters/<name>/ for the outfits
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
