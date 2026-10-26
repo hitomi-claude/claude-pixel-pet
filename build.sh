@@ -14,6 +14,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleName</key><string>ClaudePet</string>
   <key>CFBundleIdentifier</key><string>io.github.kirigirihitomi.claude-pixel-pet</string>
   <key>CFBundleExecutable</key><string>ClaudePet</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>LSUIElement</key><true/>

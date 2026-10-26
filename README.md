@@ -79,7 +79,8 @@ Sessions the pet runs itself don't need it: their permission requests already po
 |---|---|
 | `main.swift` | the whole app (AppKit, no dependencies) |
 | `build.sh` | compiles with `swiftc` and packages the `.app` |
-| `Resources/` | sprite frames: mouth closed / half / open, plus face poses (blinks, reading, yawn, smile, surprised); `Characters/<name>/` holds the outfits |
+| `Resources/` | sprite frames: mouth closed / half / open, plus face poses (blinks, reading, yawn, smile, surprised); `Characters/<name>/` holds the outfits; `AppIcon.icns` is the app icon |
+| `tools/make_icon.py` | builds `Resources/AppIcon.icns` from a sprite: head and shoulders on a navy plate, every size through `iconutil` (numpy, Pillow) |
 | `tools/defringe.py` | cleans leftover white background out of the hair in a cut-out sprite; `--face` protects a region, `--fill-face-holes` repairs punched-out eye whites (numpy, scipy, Pillow) |
 
 ## License
