@@ -105,9 +105,20 @@ enum Sfx {
     static let soft = [(523.25, 3), (587.33, 4), (659.25, 1), (698.46, 1), (783.99, 3), (880.0, 3)]
         .flatMap { f, w in Array(repeating: blipSound(f), count: w) }
     static let chip = [0.96, 0.98, 0.99, 1.0, 1.01, 1.02, 1.04].map { blipSound(783.99 * $0, pulse: true) }
-    static func blip(_ v: Voice) {
-        guard let s = (v == .chip ? chip : v == .soft ? soft : []).randomElement() else { return }
-        s.stop(); s.play()
+    static func blip(_ v: Voice, _ tune: inout Tune) {
+        (v == .chip ? chip : v == .soft ? soft : []).randomElement(using: &tune).map { $0.stop(); $0.play() }
+    }
+}
+/// Which notes a line gets: a SplitMix64 stream seeded by an FNV-1a hash of the text, so the same line always sounds the
+/// same (Swift's Hasher is reseeded every launch).
+struct Tune: RandomNumberGenerator {
+    var state: UInt64
+    init(_ text: String) { state = text.utf8.reduce(0xcbf29ce484222325) { ($0 ^ UInt64($1)) &* 0x100000001b3 } }
+    mutating func next() -> UInt64 {
+        state &+= 0x9e3779b97f4a7c15
+        var z = (state ^ (state >> 30)) &* 0xbf58476d1ce4e5b9
+        z = (z ^ (z >> 27)) &* 0x94d049bb133111eb
+        return z ^ (z >> 31)
     }
 }
 
@@ -737,7 +748,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     // typewriter: the bubble's text appears a character at a time (about 11 a second, a pause at commas and sentence
     // ends, faster for long text so it takes ~5 s at most) with a blip at most every 0.18 s; say() plays the mouth
     // flap on the same schedule
-    var typing: (full: [Character], shown: Int, next: Double, step: Double, voiced: Bool)?
+    var typing: (full: [Character], shown: Int, next: Double, step: Double, voiced: Bool, tune: Tune)?
     var voice = Voice.saved(), lastBlip = 0.0, sayText = ""   // the voice picked; when the last blip played; the whole text being said
     let pauses = Set(",.!?;:，。！？；：、\n")
     func pauseAfter(_ c: Character, step: Double) -> Double { pauses.contains(c) ? step * 2.8 : step }
@@ -746,7 +757,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let before = ty.shown
         while ty.shown < ty.full.count && t >= ty.next {
             let c = ty.full[ty.shown]; ty.shown += 1; ty.next += pauseAfter(c, step: ty.step)
-            if ty.voiced && !pauses.contains(c) && !c.isWhitespace && t - lastBlip >= voice.gap { Sfx.blip(voice); lastBlip = t }
+            if ty.voiced && !pauses.contains(c) && !c.isWhitespace && t - lastBlip >= voice.gap { Sfx.blip(voice, &ty.tune); lastBlip = t }
         }
         if ty.shown != before { bubble.string = String(ty.full.prefix(ty.shown)); layoutOverlays() }
         typing = ty.shown == ty.full.count ? nil : ty
@@ -771,7 +782,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let flap = full.enumerated().map { i, c in (pauses.contains(c) ? Pose.closed : [.half, .open, .half, .closed][i % 4], pauseAfter(c, step: step)) }
         let woke = asleep; poke()   // the talk replaces poke's stretch: stretch once she's said it
         sayText = text; bubble.string = ""; bubble.isHidden = false
-        typing = (full, 0, t, step, voiced)
+        typing = (full, 0, t, step, voiced, Tune(text))
         play(flap + (woke ? wake : []) + then, .talk)
         holdBubble((hold ?? max(4, Double(text.count) / 12)) + flap.reduce(0) { $0 + $1.1 })
     }
