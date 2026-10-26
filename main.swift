@@ -666,15 +666,12 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         t += 1 / 30
         view.bob = (CGFloat(sin(t * 2 * .pi / 3.2) + 1) * view.spriteHeight * 0.006).rounded()
         if waiting && Int(t * 30) % 12 == 0 { bubble.string = String(repeating: "·", count: Int(t * 2.5) % 3 + 1) }
-        if !anim.isEmpty && t >= animStepEnd {
+        while !anim.isEmpty && t >= animStepEnd {   // catch up on frames shorter than a tick (fast typing)
             anim.removeFirst()
-            animStepEnd = t + (anim.first?.1 ?? 0)
+            animStepEnd += anim.first?.1 ?? 0
         }
-        let pose = anim.first?.0 ?? .closed
-        if pose == .half && view.pose != .half && voiced {   // a blip every 0.18 s of talk
-            Sfx.play(Sfx.blips.randomElement()!)
-        }
-        view.pose = pose
+        typeStep()
+        view.pose = anim.first?.0 ?? .closed
         if anim.isEmpty && t >= nextIdle { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
     }
 
@@ -686,16 +683,23 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         guard !seq.isEmpty, anim.isEmpty || priority.rawValue >= animPriority.rawValue else { return }
         anim = seq; animPriority = priority; animStepEnd = t + seq[0].1
     }
-    /// Mouth flap for `text`, 90ms per frame, about one frame per two characters (capped), resting a moment at commas
-    /// and sentence ends.
-    func talking(_ text: String) -> [(Pose, Double)] {
-        let clauses = text.split(whereSeparator: { ",.!?;，。！？；、\n".contains($0) }).filter { !$0.allSatisfy(\.isWhitespace) }
-        let steps = min(8 + text.count / 2, 60), chars = max(1, clauses.reduce(0) { $0 + $1.count })
-        return clauses.enumerated().flatMap { i, c in
-            (i > 0 ? [(Pose.closed, 0.25)] : []) + (0..<max(4, steps * c.count / chars)).map { ([Pose.closed, .half, .open, .half][$0 % 4], 0.09) }
+    // typewriter: the bubble's text appears a character at a time (about 11 a second, a pause at commas and sentence
+    // ends, faster for long text so it takes ~5 s at most) with a blip at most every 0.18 s; say() plays the mouth
+    // flap on the same schedule
+    var typing: (full: [Character], shown: Int, next: Double, step: Double, voiced: Bool)?
+    var lastBlip = 0.0, sayText = ""   // when the last blip played; the whole text being said
+    let pauses = Set(",.!?;:，。！？；：、\n")
+    func pauseAfter(_ c: Character, step: Double) -> Double { pauses.contains(c) ? step * 2.8 : step }
+    func typeStep() {   // called by tick
+        guard var ty = typing else { return }
+        let before = ty.shown
+        while ty.shown < ty.full.count && t >= ty.next {
+            let c = ty.full[ty.shown]; ty.shown += 1; ty.next += pauseAfter(c, step: ty.step)
+            if ty.voiced && !pauses.contains(c) && !c.isWhitespace && t - lastBlip >= 0.18 { Sfx.play(Sfx.blips.randomElement()!); lastBlip = t }
         }
+        if ty.shown != before { bubble.string = String(ty.full.prefix(ty.shown)); layoutOverlays() }
+        typing = ty.shown == ty.full.count ? nil : ty
     }
-    var voiced = true   // the current talk makes blips
     let blink: [(Pose, Double)] = [(.blink_half, 0.05), (.blink_closed, 0.08), (.blink_half, 0.05)]
     lazy var idleActions: [(chance: Double, seq: [(Pose, Double)])] = [
         (0.06, [(.blink_half, 0.08), (.yawn, 1.4), (.blink_half, 0.1)]),                    // rare yawn
@@ -708,13 +712,15 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         for a in idleActions { r -= a.chance; if r < 0 { play(a.seq, .idle); return } }
     }
 
-    /// Show `text` in the bubble for `hold` seconds (it also stays while the input is open or Claude is working),
-    /// moving the mouth; `then` plays right after the talking.
+    /// Type `text` into the bubble and keep it up for `hold` seconds after (it also stays while the input is open or
+    /// Claude is working); `then` plays right after the typing.
     func say(_ text: String, hold: TimeInterval? = nil, then: [(Pose, Double)] = [], voiced: Bool = true) {
-        self.voiced = voiced
-        bubble.string = text; bubble.isHidden = false; layoutOverlays()
-        play(talking(text) + then, .talk)
-        holdBubble(hold ?? max(4, Double(text.count) / 12))
+        let full = Array(text), step = min(0.09, 5 / Double(max(full.count, 1)))
+        let flap = full.enumerated().map { i, c in (pauses.contains(c) ? Pose.closed : [.half, .open, .half, .closed][i % 4], pauseAfter(c, step: step)) }
+        sayText = text; bubble.string = ""; bubble.isHidden = false
+        typing = (full, 0, t, step, voiced)
+        play(flap + then, .talk)
+        holdBubble((hold ?? max(4, Double(text.count) / 12)) + flap.reduce(0) { $0 + $1.1 })
     }
     /// Keep the bubble up for `hold` seconds (longer while the input is open or Claude is working).
     func holdBubble(_ hold: TimeInterval) {
@@ -757,7 +763,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             pending.append((id, title, input)); showCard()
         case .done(let s):
             waiting = false; agentStep = ""
-            if s.isEmpty || s == bubble.string { holdBubble(readTime(bubble.string)) }   // already said by .text: let it finish
+            if s.isEmpty || s == sayText { holdBubble(readTime(sayText)) }   // already said by .text: let it finish
             else { say(s, hold: readTime(s)) }
         case .failed(let s): waiting = false; agentStep = ""; say(s)
         }
@@ -819,7 +825,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
                 self.askText = "\(project) needs your permission: \(tool)"
                 self.window.orderFrontRegardless(); self.say(self.askText!, hold: 120)
             case .hide:
-                if self.bubble.string == self.askText { self.hideBubble() }
+                if self.sayText == self.askText { self.hideBubble() }
                 self.askText = nil
             }
         }
