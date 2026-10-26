@@ -949,7 +949,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     // menu
     var usageItems: [NSMenuItem] = []
-    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), voiceMenu = NSMenu(), characterMenu = NSMenu()
+    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), voiceMenu = NSMenu(), characterMenu = NSMenu(), sizeMenu = NSMenu()
     var sessions: [Session] = []
     func refreshSessions() {   // off the main thread; the submenus show the last result
         pollQueue.async { let s = recentSessions(); DispatchQueue.main.async { self.sessions = s } }
@@ -967,8 +967,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         m.addItem(withTitle: "Open in Terminal", action: nil, keyEquivalent: "").submenu = terminalMenu
         switchMenu.delegate = self; terminalMenu.delegate = self; characterMenu.delegate = self
         m.addItem(.separator())
-        for (i, (name, _)) in sizes.enumerated() {
-            let it = m.addItem(withTitle: name, action: #selector(pickSize(_:)), keyEquivalent: ""); it.tag = i
+        m.addItem(withTitle: "Size", action: nil, keyEquivalent: "").submenu = sizeMenu
+        for (i, (name, h)) in sizes.enumerated() {
+            let it = sizeMenu.addItem(withTitle: name, action: #selector(pickSize(_:)), keyEquivalent: "")
+            it.target = self; it.tag = i; it.state = h == height ? .on : .off
         }
         let top = m.addItem(withTitle: "Always on top", action: #selector(toggleTop(_:)), keyEquivalent: "")
         top.state = window.level == .floating ? .on : .off
@@ -1044,7 +1046,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     @objc func openInTerminal(_ item: NSMenuItem) { resumeInTerminal(sessions[item.tag]) }
     @objc func stopAgent() { agent.interrupt() }
     @objc func openChat() { if input.isHidden { toggleInput() } }
-    @objc func pickSize(_ s: NSMenuItem) { resize(sizes[s.tag].1) }
+    func check(_ s: NSMenuItem) { s.menu?.items.forEach { $0.state = $0 === s ? .on : .off } }   // the one ticked item of a submenu
+    @objc func pickSize(_ s: NSMenuItem) { resize(sizes[s.tag].1); check(s) }
     @objc func toggleTop(_ s: NSMenuItem) {
         window.level = window.level == .floating ? .normal : .floating
         s.state = window.level == .floating ? .on : .off
@@ -1056,7 +1059,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
     @objc func pickVoice(_ s: NSMenuItem) {
         voice = Voice.allCases[s.tag]; UserDefaults.standard.set(voice.rawValue, forKey: "voice")
-        voiceMenu.items.forEach { $0.state = $0 === s ? .on : .off }
+        check(s)
         say(voice == .off ? "Quiet now." : "Like this?")
     }
     @objc func pickCharacter(_ item: NSMenuItem) {
