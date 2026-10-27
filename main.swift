@@ -155,17 +155,19 @@ func characters() -> [(name: String, dir: URL)] {
 enum Pixelate {
     typealias RGB = SIMD3<Float>
     struct Blocks { let w: Int, h: Int, ox: Int, oy: Int; var rgb: [RGB], solid: [Bool] }
+    static func rgbaContext(_ px: inout [UInt8], _ w: Int, _ h: Int) -> CGContext {
+        CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    }
     static func blocks(_ cg: CGImage, _ k: Int) -> Blocks {
         let w = cg.width, h = cg.height
         var px = [UInt8](repeating: 0, count: w * h * 4)
-        let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        rgbaContext(&px, w, h).draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
         let ox = (w / 2) % k, oy = h % k, bw = (w - ox) / k, bh = (h - oy) / k   // a block edge at the centre and at the bottom
         var b = Blocks(w: bw, h: bh, ox: ox, oy: oy, rgb: [RGB](repeating: .zero, count: bw * bh), solid: [Bool](repeating: false, count: bw * bh))
-        let lum = RGB(0.299, 0.587, 0.114)
+        let lum = RGB(0.299, 0.587, 0.114), offsets = (0..<k * k).map { ($0 / k * w + $0 % k) * 4 }   // a block's pixels, from its top left
         for by in 0..<bh { for bx in 0..<bw {
-            let idx = (0..<k * k).map { ((oy + by * k + $0 / k) * w + ox + bx * k + $0 % k) * 4 }
+            let top = ((oy + by * k) * w + ox + bx * k) * 4, idx = offsets.lazy.map { top + $0 }
             var sum = RGB.zero, alpha: Float = 0
             for i in idx { sum += RGB(Float(px[i]), Float(px[i + 1]), Float(px[i + 2])); alpha += Float(px[i + 3]) / 255 }   // premultiplied
             guard alpha > Float(k * k) / 2 else { continue }
@@ -202,16 +204,15 @@ enum Pixelate {
     }
     static func image(_ b: Blocks, _ k: Int, _ lut: [RGB], width: Int, height: Int) -> NSImage {
         var px = [UInt8](repeating: 0, count: width * height * 4)
+        let q = { (v: Float) in min(max(Int(v), 0), 255) >> 3 }
         for by in 0..<b.h { for bx in 0..<b.w where b.solid[by * b.w + bx] {
-            let c = b.rgb[by * b.w + bx], q = { (v: Float) in min(max(Int(v), 0), 255) >> 3 }, p = lut[q(c.x) << 10 | q(c.y) << 5 | q(c.z)]
+            let c = b.rgb[by * b.w + bx], p = lut[q(c.x) << 10 | q(c.y) << 5 | q(c.z)]
             for dy in 0..<k { for dx in 0..<k {
                 let i = ((b.oy + by * k + dy) * width + b.ox + bx * k + dx) * 4
                 px[i] = UInt8(p.x.rounded()); px[i + 1] = UInt8(p.y.rounded()); px[i + 2] = UInt8(p.z.rounded()); px[i + 3] = 255
             } }
         } }
-        let ctx = CGContext(data: &px, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        let im = NSImage(size: NSSize(width: width, height: height)); im.addRepresentation(NSBitmapImageRep(cgImage: ctx.makeImage()!))   // a bitmap rep reports its real pixel size (a CGImage snapshot rep reports it at the screen scale)
+        let im = NSImage(size: NSSize(width: width, height: height)); im.addRepresentation(NSBitmapImageRep(cgImage: rgbaContext(&px, width, height).makeImage()!))   // a bitmap rep reports its real pixel size (a CGImage snapshot rep reports it at the screen scale)
         return im
     }
 }
@@ -718,7 +719,7 @@ final class SettingsPanel: NSObject {
         size.selectItem(at: app.sizes.firstIndex { $0.1 == app.height } ?? -1)
         character.removeAllItems()
         for c in characters() { character.addItem(withTitle: c.name); character.lastItem?.representedObject = c.dir }
-        character.selectItem(withTitle: UserDefaults.standard.string(forKey: "character") ?? "Claude")
+        character.selectItem(withTitle: app.currentCharacter)
         preview.sprite = app.view.sprite
         voice.selectItem(at: Voice.allCases.firstIndex(of: app.voice) ?? 0)
         top.state = app.window.level == .floating ? .on : .off; fade.state = app.fadeOnHover ? .on : .off
@@ -777,7 +778,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     let pixelSizes: [(String, Int)] = [("Fine", 2), ("Medium", 3), ("Coarse", 4)]   // block size in source pixels
     var pixelLevel = min(UserDefaults.standard.integer(forKey: "pixelLevel"), 2)
     var block: Int? { pixelArt ? pixelSizes[pixelLevel].1 : nil }
-    var settings: SettingsPanel?
+    var settings: SettingsPanel?, spriteGen = 0   // spriteGen numbers the sprite builds, so a slow old one can't replace a newer
+    var currentCharacter: String { UserDefaults.standard.string(forKey: "character") ?? "Claude" }
     let relative: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f }()
     var sigterm: DispatchSourceSignal?
 
@@ -793,7 +795,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.level = UserDefaults.standard.object(forKey: "onTop") as? Bool ?? true ? .floating : .normal
-        view = PetView(sprite: characters().first { $0.name == UserDefaults.standard.string(forKey: "character") }
+        view = PetView(sprite: characters().first { $0.name == currentCharacter }
             .flatMap { Sprite($0.dir, block: block) } ?? Sprite(Bundle.main.resourceURL!, block: block)!)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }
@@ -1141,10 +1143,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     func menuNeedsUpdate(_ menu: NSMenu) {
         if menu === characterMenu {   // folders may have been added since the last look
             menu.removeAllItems()
-            let current = UserDefaults.standard.string(forKey: "character") ?? "Claude"
             for c in characters() {
                 let it = menu.addItem(withTitle: c.name, action: #selector(pickCharacter(_:)), keyEquivalent: "")
-                it.target = self; it.representedObject = c.dir; it.state = c.name == current ? .on : .off
+                it.target = self; it.representedObject = c.dir; it.state = c.name == currentCharacter ? .on : .off
             }
             menu.addItem(.separator())
             menu.addItem(withTitle: "Add Character…", action: #selector(addCharacter), keyEquivalent: "").target = self
@@ -1201,10 +1202,14 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         UserDefaults.standard.set(on, forKey: "pixelArt"); UserDefaults.standard.set(level, forKey: "pixelLevel")
         loadSprite(view.sprite.dir) { [weak self] in if let s = $0 { self?.view.sprite = s; self?.settings?.reload() } }
     }
-    /// Builds a sprite off the main thread (pixelating takes a few hundred ms), then hands it back on the main thread.
+    /// Builds a sprite off the main thread (pixelating takes a few hundred ms), then hands it back on the main thread,
+    /// unless a newer build was asked for meanwhile.
     func loadSprite(_ dir: URL, then: @escaping (Sprite?) -> Void) {
-        let block = block
-        DispatchQueue.global(qos: .userInitiated).async { let s = Sprite(dir, block: block); DispatchQueue.main.async { then(s) } }
+        let block = block; spriteGen += 1; let gen = spriteGen
+        DispatchQueue.global(qos: .userInitiated).async {
+            let s = Sprite(dir, block: block)
+            DispatchQueue.main.async { if gen == self.spriteGen { then(s) } }
+        }
     }
     func setVoice(_ v: Voice) {
         voice = v; UserDefaults.standard.set(v.rawValue, forKey: "voice")
@@ -1225,8 +1230,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     /// the other poses are optional (see README).
     @objc func addCharacter() {
         guard let src = pickFolder("A folder with closed.png (and optionally half, open, blink_half, blink_closed, read, yawn, surprised, sleep, work, stretch .png)") else { return }
-        guard let s = Sprite(src, block: block) else { return say("That folder needs a closed.png, the neutral frame.") }
-        let fm = FileManager.default, taken = Set(characters().map(\.name))
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: Pose.closed.png(in: src).path) else { return say("That folder needs a closed.png, the neutral frame.") }
+        let taken = Set(characters().map(\.name))
         var name = src.lastPathComponent, n = 2
         while taken.contains(name) || fm.fileExists(atPath: charactersDir.appendingPathComponent(name).path) { name = "\(src.lastPathComponent) \(n)"; n += 1 }
         let dst = charactersDir.appendingPathComponent(name)
@@ -1235,7 +1241,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             try fm.createDirectory(at: dst, withIntermediateDirectories: true)
             for p in present { try fm.copyItem(at: p.png(in: src), to: p.png(in: dst)) }
         } catch { return say("I couldn't copy it: \(error.localizedDescription)") }
-        switchCharacter(name, s)
+        setCharacter(name, dst)
         say("Added \(name): \(present.count) of \(Pose.allCases.count) frames.")
     }
     @objc func openCharacters() {
