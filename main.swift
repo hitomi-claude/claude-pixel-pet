@@ -726,7 +726,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let hover = fadeOnHover && view.spriteRect.contains(view.convert(window.mouseLocationOutsideOfEventStream, from: nil))
         let target: CGFloat = hover ? 0.3 : 1
         view.fade = abs(target - view.fade) < 0.01 ? target : view.fade + (target - view.fade) * 0.2
-        if !input.isHidden && input.stringValue.isEmpty && t - inputSince > 30 { closeInput() }
+        if !input.isHidden && t - inputSince > 30 && input.stringValue.isEmpty { closeInput() }
         if anim.isEmpty && t >= nextIdle && !asleep { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
     }
     // dozes off after 5 minutes without a click, a word or a busy Claude Code session; poke() wakes her with a stretch, or with a start when she's clicked
