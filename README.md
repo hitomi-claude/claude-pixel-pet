@@ -83,7 +83,7 @@ Sessions the pet runs itself don't need it: their permission requests already po
 | `build.sh` | compiles with `swiftc` and packages the `.app` |
 | `Resources/` | smooth sprite frames (the app pixelates them): mouth closed / half / open, plus face poses (blinks, reading, yawn, surprised) and full-body poses; `Characters/<name>/` holds the outfits; `AppIcon.icns` is the app icon |
 | `tools/make_icon.py` | builds `Resources/AppIcon.icns` from a sprite: head and shoulders on a cream plate, every size through `iconutil` (numpy, Pillow) |
-| `tools/cutout.py` | cuts a sprite out of its white background and scales it to 600 px; `--white 246` for white clothes (numpy, scipy, Pillow) |
+| `tools/cutout.py` | cuts a sprite out of its white background and scales it to 600 px; `--white 246` for white clothes; `--list-gaps` and `--bg X,Y` for a thin white pocket it keeps by mistake (numpy, scipy, Pillow) |
 | `tools/fit_frame.py` | scales and places a full-body pose so its head mark and soles line up with `closed.png`, growing the canvas for raised arms (numpy, OpenCV, Pillow) |
 | `tools/face_frames.py` | gives a new outfit all the face frames by matching its face to Claude's and pasting each frame's eyes and mouth (numpy, Pillow) |
 | `tools/defringe.py` | cleans leftover white background out of the hair in a cut-out sprite; `--face` protects a region, `--fill-face-holes` repairs punched-out eye whites (numpy, scipy, Pillow) |

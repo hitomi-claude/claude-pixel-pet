@@ -2,11 +2,14 @@
 Background is near-white connected to the image border, plus enclosed white gaps: big ones (under an arm) whose
 surroundings are not white cloth, and gaps of any size between hair strands (surrounded mostly by hair, or partly by
 hair and not by white cloth, like a gap between a strand and the skirt's outline). Specks left outside the character are dropped.
-Usage: python3 cutout.py in.png out.png [--white 232] [--min-gap 4000] [--height 600] [--preview p.png]
+Usage: python3 cutout.py in.png out.png [--white 232] [--min-gap 4000] [--height 600] [--bg X,Y ...] [--preview p.png]
   --white    how white a pixel must be (min channel) to count as background. Raise it (246) for white clothes or hats
              that lack a dark outline, or the cutout eats into them.
   --min-gap  smallest enclosed white area (px) treated as background unless it sits in hair
-  --height   scale the result to this height (sprites ship at 600 px)"""
+  --height   scale the result to this height (sprites ship at 600 px)
+  --bg       a point (in the input image) inside a white pocket that is background but the rules keep, for example a thin
+             sliver beside a strand of hair that sits near white cloth. Repeat it for each pocket. `--list-gaps` prints the
+             pockets that are kept, with a point inside each."""
 import argparse, numpy as np
 from PIL import Image, ImageFilter
 from scipy import ndimage
@@ -15,6 +18,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("src"); ap.add_argument("out")
 ap.add_argument("--white", type=int, default=232); ap.add_argument("--min-gap", type=int, default=4000)
 ap.add_argument("--height", type=int); ap.add_argument("--preview")
+ap.add_argument("--bg", action="append", default=[], metavar="X,Y"); ap.add_argument("--list-gaps", action="store_true")
 args = ap.parse_args()
 
 im = Image.open(args.src).convert("RGB")
@@ -33,6 +37,13 @@ for i, sl in enumerate(ndimage.find_objects(lab), start=1):
     near = ring & ~bg[ys, xs]   # what it touches besides background
     h = hair[ys, xs][near].mean() if near.any() else 0
     if h > 0.5 or cloth[ys, xs][ring].mean() < 0.25 and (sizes[i] >= args.min_gap or h > 0.35): bg[ys, xs] |= comp
+    elif args.list_gaps:
+        py, px = np.argwhere(comp).mean(0); y, x = min(np.argwhere(comp), key=lambda q: (q[0] - py) ** 2 + (q[1] - px) ** 2)
+        print(f"kept: {sizes[i]} px, hair {h:.2f}, cloth {cloth[ys, xs][ring].mean():.2f}; --bg {x + xs.start},{y + ys.start}")
+for pt in args.bg:
+    x, y = map(int, pt.split(","))
+    if lab[y, x] == 0: raise SystemExit(f"--bg {pt}: that point is not in a white pocket")
+    bg |= lab == lab[y, x]
 bg = ndimage.binary_opening(bg, iterations=2)
 fg, m = ndimage.label(~bg)
 keep = np.bincount(fg.ravel())[1:]
