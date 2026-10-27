@@ -149,16 +149,93 @@ func characters() -> [(name: String, dir: URL)] {
     return [("Claude", res)] + folders(res.appendingPathComponent("Characters")) + folders(charactersDir)
 }
 
+/// Pixel art from a smooth frame: k x k blocks (k = 2 gives a 300 px grid on a 600 px frame), laid out from the bottom
+/// centre so every frame shares the grid. A block takes its mean colour, or its dark pixels' when they fill 30% of it
+/// (thin outlines survive), then the nearest of the 64 colours taken from closed.png, so talking doesn't flicker.
+enum Pixelate {
+    typealias RGB = SIMD3<Float>
+    struct Blocks { let w: Int, h: Int, ox: Int, oy: Int; var rgb: [RGB], solid: [Bool] }
+    static func blocks(_ cg: CGImage, _ k: Int) -> Blocks {
+        let w = cg.width, h = cg.height
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let ox = (w / 2) % k, oy = h % k, bw = (w - ox) / k, bh = (h - oy) / k   // a block edge at the centre and at the bottom
+        var b = Blocks(w: bw, h: bh, ox: ox, oy: oy, rgb: [RGB](repeating: .zero, count: bw * bh), solid: [Bool](repeating: false, count: bw * bh))
+        let lum = RGB(0.299, 0.587, 0.114)
+        for by in 0..<bh { for bx in 0..<bw {
+            let idx = (0..<k * k).map { ((oy + by * k + $0 / k) * w + ox + bx * k + $0 % k) * 4 }
+            var sum = RGB.zero, alpha: Float = 0
+            for i in idx { sum += RGB(Float(px[i]), Float(px[i + 1]), Float(px[i + 2])); alpha += Float(px[i + 3]) / 255 }   // premultiplied
+            guard alpha > Float(k * k) / 2 else { continue }
+            let mean = sum / alpha
+            var dark = RGB.zero, n: Float = 0
+            for i in idx where px[i + 3] > 127 {
+                let c = RGB(Float(px[i]), Float(px[i + 1]), Float(px[i + 2])) * (255 / Float(px[i + 3]))
+                if (c * lum).sum() < (mean * lum).sum() - 45 { dark += c; n += 1 }
+            }
+            b.rgb[by * bw + bx] = n >= 0.3 * Float(k * k) ? dark / n : mean
+            b.solid[by * bw + bx] = true
+        } }
+        return b
+    }
+    /// Median cut: split the box with the widest channel at its median until there are n boxes; each box's mean is a
+    /// palette colour. Returns a lookup table from 5-bit RGB to the nearest of them.
+    static func palette(_ b: Blocks, _ n: Int = 64) -> [RGB] {
+        var boxes = [zip(b.rgb, b.solid).filter(\.1).map(\.0)]
+        while boxes.count < n {
+            let spans = boxes.map { c -> (Float, Int) in
+                guard c.count > 1 else { return (0, 0) }
+                let lo = c.reduce(c[0]) { pointwiseMin($0, $1) }, hi = c.reduce(c[0]) { pointwiseMax($0, $1) }, d = hi - lo
+                return d.x >= d.y && d.x >= d.z ? (d.x, 0) : d.y >= d.z ? (d.y, 1) : (d.z, 2)
+            }
+            guard let i = spans.indices.max(by: { spans[$0].0 < spans[$1].0 }), spans[i].0 > 0 else { break }
+            let s = boxes[i].sorted { $0[spans[i].1] < $1[spans[i].1] }
+            boxes[i] = Array(s[..<(s.count / 2)]); boxes.append(Array(s[(s.count / 2)...]))
+        }
+        let pal = boxes.map { $0.reduce(RGB.zero, +) / Float($0.count) }
+        return (0..<32768).map { i in   // nearest palette colour for each 5-bit RGB cube, so a lookup per block
+            let c = RGB(Float(i >> 10), Float(i >> 5 & 31), Float(i & 31)) * 8 + 4
+            return pal.min { (($0 - c) * ($0 - c)).sum() < (($1 - c) * ($1 - c)).sum() }!
+        }
+    }
+    static func image(_ b: Blocks, _ k: Int, _ lut: [RGB], width: Int, height: Int) -> NSImage {
+        var px = [UInt8](repeating: 0, count: width * height * 4)
+        for by in 0..<b.h { for bx in 0..<b.w where b.solid[by * b.w + bx] {
+            let c = b.rgb[by * b.w + bx], q = { (v: Float) in min(max(Int(v), 0), 255) >> 3 }, p = lut[q(c.x) << 10 | q(c.y) << 5 | q(c.z)]
+            for dy in 0..<k { for dx in 0..<k {
+                let i = ((b.oy + by * k + dy) * width + b.ox + bx * k + dx) * 4
+                px[i] = UInt8(p.x.rounded()); px[i + 1] = UInt8(p.y.rounded()); px[i + 2] = UInt8(p.z.rounded()); px[i + 3] = 255
+            } }
+        } }
+        let ctx = CGContext(data: &px, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let im = NSImage(size: NSSize(width: width, height: height)); im.addRepresentation(NSBitmapImageRep(cgImage: ctx.makeImage()!))   // a bitmap rep reports its real pixel size (a CGImage snapshot rep reports it at the screen scale)
+        return im
+    }
+}
+
 final class Sprite {
+    let dir: URL
+    var pixel: Bool { block != nil }
+    private let block: Int?   // pixel-art block size in source pixels, or nil for the smooth frames
     let frames: [Pose: NSImage]
     let size: [Pose: CGSize]   // each frame's size relative to closed.png; full-body poses can be bigger (raised arms)
     let aspect: CGFloat
     private let w: Int, h: Int, mask: [Bool]   // opaque pixels of the neutral frame, for click-through
-    init?(_ dir: URL) {
+    init?(_ dir: URL, block: Int?) {
         guard let base = NSImage(contentsOf: Pose.closed.png(in: dir)),
               let cg = base.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        let own = Dictionary(uniqueKeysWithValues: Pose.allCases.compactMap { p in NSImage(contentsOf: p.png(in: dir)).map { (p, $0) } })
-        frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, own[$0] ?? $0.standIn.flatMap { own[$0] } ?? base) })
+        self.dir = dir; self.block = block
+        var own = Dictionary(uniqueKeysWithValues: Pose.allCases.compactMap { p in NSImage(contentsOf: p.png(in: dir)).map { (p, $0) } })
+        if let k = block {
+            let pal = Pixelate.palette(Pixelate.blocks(cg, k))
+            own = own.compactMapValues { im in
+                im.cgImage(forProposedRect: nil, context: nil, hints: nil).map { Pixelate.image(Pixelate.blocks($0, k), k, pal, width: $0.width, height: $0.height) }
+            }
+        }
+        frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, own[$0] ?? $0.standIn.flatMap { own[$0] } ?? own[.closed]!) })
         w = cg.width; h = cg.height; aspect = CGFloat(w) / CGFloat(h)
         size = frames.mapValues { im in im.representations.first.map { CGSize(width: CGFloat($0.pixelsWide) / CGFloat(cg.width), height: CGFloat($0.pixelsHigh) / CGFloat(cg.height)) } ?? CGSize(width: 1, height: 1) }
         var alpha = [UInt8](repeating: 0, count: w * h)   // draw into an alpha-only buffer: one pass, no per-pixel objects
@@ -197,7 +274,7 @@ final class PetView: NSView {
         return NSRect(x: (bounds.width - w) / 2, y: bob, width: w, height: spriteHeight)
     }
     override func draw(_ dirtyRect: NSRect) {
-        NSGraphicsContext.current?.imageInterpolation = .high
+        NSGraphicsContext.current?.imageInterpolation = sprite.pixel ? .none : .high
         let r = spriteRect, k = sprite.size[pose]!   // same scale and bottom centre as closed.png
         sprite.frames[pose]!.draw(in: NSRect(x: r.midX - r.width * k.width / 2, y: r.minY, width: r.width * k.width, height: r.height * k.height),
                                   from: .zero, operation: .sourceOver, fraction: fade)
@@ -592,6 +669,69 @@ func planLimits(_ dir: URL, done: @escaping (Result<[Limit], LimitError>) -> Voi
 
 // MARK: app
 
+/// A small copy of the pet for the settings window, drawn the way the pet is (no smoothing for pixel art).
+final class SpritePreview: NSView {
+    var sprite: Sprite? { didSet { needsDisplay = true } }
+    override var intrinsicContentSize: NSSize { NSSize(width: 150, height: 240) }
+    override func draw(_ dirtyRect: NSRect) {
+        guard let s = sprite else { return }
+        NSGraphicsContext.current?.imageInterpolation = s.pixel ? .none : .high
+        s.frames[.closed]!.draw(in: NSRect(x: (bounds.width - bounds.height * s.aspect) / 2, y: 0, width: bounds.height * s.aspect, height: bounds.height),
+                                from: .zero, operation: .sourceOver, fraction: 1)
+    }
+}
+
+/// The settings window. Every control applies at once; reload() reads them back from the app's state each time it opens
+/// and whenever the sprite changes, so the preview and the controls follow a character or pixel change.
+final class SettingsPanel: NSObject {
+    unowned let app: App
+    let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    let size = NSPopUpButton(), character = NSPopUpButton(), voice = NSPopUpButton(), preview = SpritePreview()
+    let top: NSButton, fade: NSButton, pixel: NSButton
+    let level: NSSegmentedControl
+
+    init(_ app: App) {
+        self.app = app
+        top = NSButton(checkboxWithTitle: "Always on top", target: nil, action: nil)
+        fade = NSButton(checkboxWithTitle: "See-through on hover", target: nil, action: nil)
+        pixel = NSButton(checkboxWithTitle: "Pixel art", target: nil, action: nil)
+        level = NSSegmentedControl(labels: app.pixelSizes.map(\.0), trackingMode: .selectOne, target: nil, action: nil)
+        super.init()
+        size.addItems(withTitles: app.sizes.map(\.0)); voice.addItems(withTitles: Voice.allCases.map(\.title))
+        for (c, a) in [(size, #selector(sizeChanged)), (character, #selector(characterChanged)), (voice, #selector(voiceChanged))] { c.target = self; c.action = a }
+        for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged)), (pixel, #selector(pixelChanged))] { c.target = self; c.action = a }
+        level.target = self; level.action = #selector(pixelChanged)
+        let add = NSButton(title: "Add…", target: app, action: #selector(App.addCharacter)), folder = NSButton(title: "Open Folder…", target: app, action: #selector(App.openCharacters))
+        let label = { (t: String) in NSTextField(labelWithString: t) }
+        let grid = NSGridView(views: [
+            [label("Size"), size], [label("Character"), character], [NSView(), NSStackView(views: [add, folder])], [label("Voice"), voice], [NSView(), top], [NSView(), fade], [NSView(), pixel], [label("Pixel size"), level]])
+        grid.rowSpacing = 10; grid.columnSpacing = 12; grid.column(at: 0).xPlacement = .trailing
+        let row = NSStackView(views: [preview, grid]); row.spacing = 24; row.alignment = .centerY
+        let box = NSView(); row.translatesAutoresizingMaskIntoConstraints = false; box.addSubview(row)
+        NSLayoutConstraint.activate([row.topAnchor.constraint(equalTo: box.topAnchor, constant: 20), row.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -20),
+                                     row.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 20), row.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -20)])
+        window.title = "Claude Pet Settings"; window.contentView = box; window.isReleasedWhenClosed = false; window.collectionBehavior = .moveToActiveSpace
+        window.level = .floating; window.setContentSize(box.fittingSize); window.center()
+    }
+    func show() { reload(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil) }
+    func reload() {
+        size.selectItem(at: app.sizes.firstIndex { $0.1 == app.height } ?? -1)
+        character.removeAllItems()
+        for c in characters() { character.addItem(withTitle: c.name); character.lastItem?.representedObject = c.dir }
+        character.selectItem(withTitle: UserDefaults.standard.string(forKey: "character") ?? "Claude")
+        preview.sprite = app.view.sprite
+        voice.selectItem(at: Voice.allCases.firstIndex(of: app.voice) ?? 0)
+        top.state = app.window.level == .floating ? .on : .off; fade.state = app.fadeOnHover ? .on : .off
+        pixel.state = app.pixelArt ? .on : .off; level.selectedSegment = app.pixelLevel; level.isEnabled = app.pixelArt
+    }
+    @objc func sizeChanged() { app.resize(app.sizes[size.indexOfSelectedItem].1) }
+    @objc func characterChanged() { if let dir = character.selectedItem?.representedObject as? URL { app.setCharacter(character.titleOfSelectedItem!, dir) } }
+    @objc func voiceChanged() { app.setVoice(Voice.allCases[voice.indexOfSelectedItem]) }
+    @objc func topChanged() { app.setTop(top.state == .on) }
+    @objc func fadeChanged() { app.setFade(fade.state == .on) }
+    @objc func pixelChanged() { level.isEnabled = pixel.state == .on; app.setPixel(pixel.state == .on, level: level.selectedSegment) }
+}
+
 final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDelegate {
     let monitor = Monitor()
     var window: PetWindow!, view: PetView!, status: NSStatusItem!
@@ -633,6 +773,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     let sizes: [(String, CGFloat)] = [("Small", 160), ("Medium", 240), ("Large", 340)]
     var height: CGFloat { CGFloat(UserDefaults.standard.object(forKey: "height") as? Double ?? 240) }
     var fadeOnHover = UserDefaults.standard.bool(forKey: "fadeOnHover")
+    var pixelArt = UserDefaults.standard.object(forKey: "pixelArt") as? Bool ?? true
+    let pixelSizes: [(String, Int)] = [("Fine", 2), ("Medium", 3), ("Coarse", 4)]   // block size in source pixels
+    var pixelLevel = min(UserDefaults.standard.integer(forKey: "pixelLevel"), 2)
+    var block: Int? { pixelArt ? pixelSizes[pixelLevel].1 : nil }
+    var settings: SettingsPanel?
     let relative: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f }()
     var sigterm: DispatchSourceSignal?
 
@@ -649,7 +794,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.level = UserDefaults.standard.object(forKey: "onTop") as? Bool ?? true ? .floating : .normal
         view = PetView(sprite: characters().first { $0.name == UserDefaults.standard.string(forKey: "character") }
-            .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
+            .flatMap { Sprite($0.dir, block: block) } ?? Sprite(Bundle.main.resourceURL!, block: block)!)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }
         view.onTouch = { [weak self] in guard let self else { return }; self.poke(self.startle) }
@@ -964,7 +1109,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     // menu
     var usageItems: [NSMenuItem] = []
-    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), voiceMenu = NSMenu(), characterMenu = NSMenu(), sizeMenu = NSMenu()
+    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), characterMenu = NSMenu()
     var sessions: [Session] = []
     func refreshSessions() {   // off the main thread; the submenus show the last result
         pollQueue.async { let s = recentSessions(); DispatchQueue.main.async { self.sessions = s } }
@@ -982,20 +1127,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         m.addItem(withTitle: "Open in Terminal", action: nil, keyEquivalent: "").submenu = terminalMenu
         switchMenu.delegate = self; terminalMenu.delegate = self; characterMenu.delegate = self
         m.addItem(.separator())
-        m.addItem(withTitle: "Size", action: nil, keyEquivalent: "").submenu = sizeMenu
-        for (i, (name, h)) in sizes.enumerated() {
-            let it = sizeMenu.addItem(withTitle: name, action: #selector(pickSize(_:)), keyEquivalent: "")
-            it.target = self; it.tag = i; it.state = h == height ? .on : .off
-        }
-        let top = m.addItem(withTitle: "Always on top", action: #selector(toggleTop(_:)), keyEquivalent: "")
-        top.state = window.level == .floating ? .on : .off
-        m.addItem(withTitle: "See-through on hover", action: #selector(toggleFade(_:)), keyEquivalent: "").state = fadeOnHover ? .on : .off
-        m.addItem(withTitle: "Voice", action: nil, keyEquivalent: "").submenu = voiceMenu
-        for (i, v) in Voice.allCases.enumerated() {
-            let it = voiceMenu.addItem(withTitle: v.title, action: #selector(pickVoice(_:)), keyEquivalent: "")
-            it.target = self; it.tag = i; it.state = v == voice ? .on : .off
-        }
         m.addItem(withTitle: "Character", action: nil, keyEquivalent: "").submenu = characterMenu
+        m.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         m.addItem(withTitle: "Hide / Show", action: #selector(toggleShow), keyEquivalent: "")
         m.addItem(.separator())
         m.addItem(withTitle: "About", action: #selector(about), keyEquivalent: "")
@@ -1061,35 +1194,38 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     @objc func openInTerminal(_ item: NSMenuItem) { resumeInTerminal(sessions[item.tag]) }
     @objc func stopAgent() { agent.interrupt() }
     @objc func openChat() { if input.isHidden { toggleInput() } }
-    func check(_ s: NSMenuItem) { s.menu?.items.forEach { $0.state = $0 === s ? .on : .off } }   // the one ticked item of a submenu
-    @objc func pickSize(_ s: NSMenuItem) { resize(sizes[s.tag].1); check(s) }
-    @objc func toggleTop(_ s: NSMenuItem) {
-        window.level = window.level == .floating ? .normal : .floating
-        s.state = window.level == .floating ? .on : .off
-        UserDefaults.standard.set(window.level == .floating, forKey: "onTop")
+    func setTop(_ on: Bool) { window.level = on ? .floating : .normal; UserDefaults.standard.set(on, forKey: "onTop") }
+    func setFade(_ on: Bool) { fadeOnHover = on; UserDefaults.standard.set(on, forKey: "fadeOnHover") }
+    func setPixel(_ on: Bool, level: Int) {
+        pixelArt = on; pixelLevel = level
+        UserDefaults.standard.set(on, forKey: "pixelArt"); UserDefaults.standard.set(level, forKey: "pixelLevel")
+        loadSprite(view.sprite.dir) { [weak self] in if let s = $0 { self?.view.sprite = s; self?.settings?.reload() } }
     }
-    @objc func toggleFade(_ s: NSMenuItem) {
-        fadeOnHover.toggle(); s.state = fadeOnHover ? .on : .off
-        UserDefaults.standard.set(fadeOnHover, forKey: "fadeOnHover")
+    /// Builds a sprite off the main thread (pixelating takes a few hundred ms), then hands it back on the main thread.
+    func loadSprite(_ dir: URL, then: @escaping (Sprite?) -> Void) {
+        let block = block
+        DispatchQueue.global(qos: .userInitiated).async { let s = Sprite(dir, block: block); DispatchQueue.main.async { then(s) } }
     }
-    @objc func pickVoice(_ s: NSMenuItem) {
-        voice = Voice.allCases[s.tag]; UserDefaults.standard.set(voice.rawValue, forKey: "voice")
-        check(s)
-        say(voice == .off ? "Quiet now." : "Like this?")
+    func setVoice(_ v: Voice) {
+        voice = v; UserDefaults.standard.set(v.rawValue, forKey: "voice")
+        say(v == .off ? "Quiet now." : "Like this?")
     }
-    @objc func pickCharacter(_ item: NSMenuItem) {
-        guard let dir = item.representedObject as? URL, let s = Sprite(dir) else { return say("I can't open that one.") }
-        switchCharacter(item.title, s)
+    func setCharacter(_ name: String, _ dir: URL) {
+        loadSprite(dir) { [weak self] s in
+            guard let s else { self?.say("I can't open that one."); return }
+            self?.switchCharacter(name, s)
+        }
     }
+    @objc func pickCharacter(_ item: NSMenuItem) { if let dir = item.representedObject as? URL { setCharacter(item.title, dir) } }
     func switchCharacter(_ name: String, _ s: Sprite) {
         UserDefaults.standard.set(name, forKey: "character")
-        view.sprite = s; resize(height)
+        view.sprite = s; resize(height); settings?.reload()
     }
     /// Copies a chosen folder into the characters folder (named after it) and switches to it. It needs closed.png;
     /// the other poses are optional (see README).
     @objc func addCharacter() {
         guard let src = pickFolder("A folder with closed.png (and optionally half, open, blink_half, blink_closed, read, yawn, surprised, sleep, work, stretch .png)") else { return }
-        guard let s = Sprite(src) else { return say("That folder needs a closed.png, the neutral frame.") }
+        guard let s = Sprite(src, block: block) else { return say("That folder needs a closed.png, the neutral frame.") }
         let fm = FileManager.default, taken = Set(characters().map(\.name))
         var name = src.lastPathComponent, n = 2
         while taken.contains(name) || fm.fileExists(atPath: charactersDir.appendingPathComponent(name).path) { name = "\(src.lastPathComponent) \(n)"; n += 1 }
@@ -1106,6 +1242,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         try? FileManager.default.createDirectory(at: charactersDir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(charactersDir)
     }
+    @objc func openSettings() { settings = settings ?? SettingsPanel(self); settings!.show() }
     @objc func toggleShow() { window.isVisible ? window.orderOut(nil) : window.orderFrontRegardless() }
     @objc func about() {
         let a = NSAlert()
