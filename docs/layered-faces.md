@@ -1,6 +1,6 @@
 # Plan: layered faces
 
-Status: proposed, not started. Recorded 2026-10-27.
+Status: paused. Recorded 2026-10-27. Step 1 was tried: qwen removed the eyes and mouth from the standing and work heads without changing the face outline. The approach was then paused, because editing pixel-art frames with this model keeps drifting. It needs a stronger model or hand-drawn parts. The non-pixel original doesn't help directly, because it is 8 heads tall and the pet is a 3-head chibi with different face proportions.
 
 ## Why
 
