@@ -10,7 +10,7 @@ A small pixel-art Claude that lives on your macOS desktop. You can chat with it,
 
 | | |
 |---|---|
-| Click the pet | open the input box; Enter sends, Esc closes |
+| Click the pet | open the input box; Enter sends, Esc closes. Left empty for 30 s, it closes by itself |
 | Right-click the pet | usage panel: plan limits, today's tokens, what's running |
 | Drag the pet | move it (clicks on the transparent area around her go through) |
 | Menu-bar ✦ | Chat, Switch session, Stop, Open in Terminal, Size, Always on top, See-through on hover, Voice, Character, Hide / Show, Quit |

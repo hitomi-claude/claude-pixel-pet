@@ -606,6 +606,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }()
     let pollQueue = DispatchQueue(label: "pet.monitor"); var polling = false
     var bubbleTimer: Timer?, t: Double = 0
+    var inputSince: Double = 0       // last time the input opened or changed: an empty one closes after 30 s
     var waiting = false              // sent a message, no text back yet: the bubble shows animated dots
     var wasWorking = false, agentStep = "", otherActivity = ""
     var pending: [(id: String, title: String, input: [String: Any])] = []
@@ -725,6 +726,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let hover = fadeOnHover && view.spriteRect.contains(view.convert(window.mouseLocationOutsideOfEventStream, from: nil))
         let target: CGFloat = hover ? 0.3 : 1
         view.fade = abs(target - view.fade) < 0.01 ? target : view.fade + (target - view.fade) * 0.2
+        if !input.isHidden && t - inputSince > 30 && input.stringValue.isEmpty { closeInput() }
         if anim.isEmpty && t >= nextIdle && !asleep { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
     }
     // dozes off after 5 minutes without a click, a word or a busy Claude Code session; poke() wakes her with a stretch, or with a start when she's clicked
@@ -803,10 +805,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     func updatePlaceholder() { input.placeholderString = "Message \(agent.target.name)…" }
     func toggleInput() {
         if !input.isHidden { closeInput(); return }
-        input.isHidden = false; layoutOverlays()
+        input.isHidden = false; inputSince = t; layoutOverlays()
         NSApp.activate(ignoringOtherApps: true); window.makeKey(); window.makeFirstResponder(input)
     }
     func closeInput() { input.isHidden = true; input.stringValue = ""; layoutOverlays(); window.resignKey() }
+    func controlTextDidChange(_ n: Notification) { inputSince = t }
     func control(_ c: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
         if sel == #selector(NSResponder.cancelOperation(_:)) { closeInput(); return true }
         guard sel == #selector(NSResponder.insertNewline(_:)) else { return false }
