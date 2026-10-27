@@ -1,6 +1,7 @@
 """Cut a sprite out of its plain white background and crop it to the character.
 Background is near-white connected to the image border, plus enclosed white gaps: big ones (under an arm) whose
-surroundings are not white cloth, and gaps of any size between hair strands (surrounded mostly by hair). Specks left outside the character are dropped.
+surroundings are not white cloth, and gaps of any size between hair strands (surrounded mostly by hair, or partly by
+hair and not by white cloth, like a gap between a strand and the skirt's outline). Specks left outside the character are dropped.
 Usage: python3 cutout.py in.png out.png [--white 232] [--min-gap 4000] [--height 600] [--preview p.png]
   --white    how white a pixel must be (min channel) to count as background. Raise it (246) for white clothes or hats
              that lack a dark outline, or the cutout eats into them.
@@ -30,7 +31,8 @@ for i, sl in enumerate(ndimage.find_objects(lab), start=1):
     comp = lab[ys, xs] == i
     ring = ndimage.binary_dilation(comp, iterations=16) & ~ndimage.binary_dilation(comp, iterations=2)
     near = ring & ~bg[ys, xs]   # what it touches besides background
-    if near.any() and hair[ys, xs][near].mean() > 0.5 or sizes[i] >= args.min_gap and cloth[ys, xs][ring].mean() < 0.25: bg[ys, xs] |= comp
+    h = hair[ys, xs][near].mean() if near.any() else 0
+    if h > 0.5 or cloth[ys, xs][ring].mean() < 0.25 and (sizes[i] >= args.min_gap or h > 0.35): bg[ys, xs] |= comp
 bg = ndimage.binary_opening(bg, iterations=2)
 fg, m = ndimage.label(~bg)
 keep = np.bincount(fg.ravel())[1:]
