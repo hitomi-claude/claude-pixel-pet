@@ -13,17 +13,17 @@ A small pixel-art Claude that lives on your macOS desktop. You can chat with it,
 | Click the pet | open the input box; Enter sends, Esc closes. Left empty for 30 s, it closes by itself |
 | Right-click the pet | usage panel: plan limits, today's tokens, what's running |
 | Drag the pet | move it; she opens there next time (clicks on the transparent area around her go through) |
-| Menu-bar ✦ | Chat, Switch session, Stop, Open in Terminal, Character, Size, Voice, Settings… (⌘,), Hide / Show, Quit |
+| Menu-bar ✦ | Session (switch, start one in a folder, or Open in Terminal), Stop, Character, Size, Pixel Size, Voice, Settings… (⌘,), Quit |
 
 **Stop** interrupts the turn the pet is running right now, like Esc in Claude Code. The session stays attached, so you can send the next message. Sessions open in your terminal or IDE are not affected.
 
 ## What it does
 
-- **Chat, or drive a real session.** Click the pet and type; press Enter to send and Esc to close. By default you're in "Pet chat", a session of its own with no tools. Use "Switch session" in the menu to attach to any recent Claude Code session, or start a new one in a folder. The pet then runs Claude Code there with its normal tools. When a tool needs approval, a card pops up above the pet's head with **Allow / Deny**. Your own permission settings still apply. "Stop" interrupts the current turn.
+- **Chat, or drive a real session.** Click the pet and type; press Enter to send and Esc to close. By default you're in "Pet chat", a session of its own with no tools. Use "Session" in the menu to attach to any recent Claude Code session, or start a new one in a folder. The pet then runs Claude Code there with its normal tools. When a tool needs approval, a card pops up above the pet's head with **Allow / Deny**. Your own permission settings still apply. "Stop" interrupts the current turn.
   Under the hood this is the same stream-json protocol the IDE extensions use: one long-lived `claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio` process per attached session.
   Attaching to a session that is still open in a terminal or IDE forks it: both continue from the same history.
 - **Claude Code activity.** While a session is working, a small label above the pet's head shows the project and the current step (for example `my-app: Bash · Run tests`). When a task that ran for more than 20 seconds finishes, the pet tells you. With the hook below, she also tells you the moment one of those sessions asks for permission (`my-app needs your permission: Bash · Run tests`).
-- **Open in Terminal.** Lists the Claude Code sessions from the last 7 days (project, title, time). Pick one and Terminal opens in that directory and runs `claude --resume` for it.
+- **Open in Terminal** (under Session). Lists the Claude Code sessions from the last 7 days (project, title, time). Pick one and Terminal opens in that directory and runs `claude --resume` for it.
 - **Usage.** The menu-bar ✦ shows today's output tokens. The menu breaks usage down per account (output, input including cache, number of sessions) and shows the context size of the latest session.
 - **Usage panel.** Right-click the pet for a panel with your plan limits per account (5-hour and weekly, with Opus / Sonnet when your plan has them), the same percentages and reset times as `/usage` in Claude Code, plus today's tokens and what is running now. The first time, macOS asks whether ClaudePet may read Claude Code's login from the keychain; choose Always Allow.
 - **Voice.** What she says types into the bubble a character at a time, about 11 a second, with a short pause at commas and sentence ends; long text speeds up so it finishes in about 5 seconds. Her mouth moves while it types. Pick the sound under Voice in Settings: **Soft** is a 50 ms sine on a note from C5 to A5, at most every 0.18 s (about every other Chinese character); **8-bit** is a 25% pulse on G5, slightly detuned, with a quick fade, one per character, like an old game's text box; or **Off**. The notes are picked from the text itself, so the same line always has the same tune.

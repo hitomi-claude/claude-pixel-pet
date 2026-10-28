@@ -1113,7 +1113,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     // menu
     var usageItems: [NSMenuItem] = []
-    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), characterMenu = NSMenu(), sizeMenu = NSMenu(), voiceMenu = NSMenu()
+    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), characterMenu = NSMenu(), sizeMenu = NSMenu(), voiceMenu = NSMenu(), pixelMenu = NSMenu()
     var sessions: [Session] = []
     func refreshSessions() {   // off the main thread; the submenus show the last result
         pollQueue.async { let s = recentSessions(); DispatchQueue.main.async { self.sessions = s } }
@@ -1125,20 +1125,19 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         m.addItem(withTitle: "Today's usage (output tokens in the icon)", action: nil, keyEquivalent: "")
         m.addItem(.separator())
         sessionLabel = m.addItem(withTitle: "", action: nil, keyEquivalent: "")
-        m.addItem(withTitle: "Chat…", action: #selector(openChat), keyEquivalent: "")
-        m.addItem(withTitle: "Switch session", action: nil, keyEquivalent: "").submenu = switchMenu
+        m.addItem(withTitle: "Session", action: nil, keyEquivalent: "").submenu = switchMenu
         m.addItem(withTitle: "Stop", action: #selector(stopAgent), keyEquivalent: "")
-        m.addItem(withTitle: "Open in Terminal", action: nil, keyEquivalent: "").submenu = terminalMenu
-        for (i, t) in sizes.map(\.0).enumerated() { sizeMenu.addItem(withTitle: t, action: #selector(pickSize(_:)), keyEquivalent: "").tag = i }
-        for (i, t) in Voice.allCases.map(\.title).enumerated() { voiceMenu.addItem(withTitle: t, action: #selector(pickVoice(_:)), keyEquivalent: "").tag = i }
-        (sizeMenu.items + voiceMenu.items).forEach { $0.target = self }
-        [switchMenu, terminalMenu, characterMenu, sizeMenu, voiceMenu].forEach { $0.delegate = self }
+        for (menu, titles, action) in [(sizeMenu, sizes.map(\.0), #selector(pickSize(_:))), (voiceMenu, Voice.allCases.map(\.title), #selector(pickVoice(_:))),
+                                       (pixelMenu, pixelSizes.map(\.0), #selector(pickPixel(_:)))] {
+            for (i, t) in titles.enumerated() { let it = menu.addItem(withTitle: t, action: action, keyEquivalent: ""); it.tag = i; it.target = self }
+        }
+        [switchMenu, terminalMenu, characterMenu, sizeMenu, voiceMenu, pixelMenu].forEach { $0.delegate = self }
         m.addItem(.separator())
         m.addItem(withTitle: "Character", action: nil, keyEquivalent: "").submenu = characterMenu
         m.addItem(withTitle: "Size", action: nil, keyEquivalent: "").submenu = sizeMenu
+        m.addItem(withTitle: "Pixel Size", action: nil, keyEquivalent: "").submenu = pixelMenu
         m.addItem(withTitle: "Voice", action: nil, keyEquivalent: "").submenu = voiceMenu
         m.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
-        m.addItem(withTitle: "Hide / Show", action: #selector(toggleShow), keyEquivalent: "")
         m.addItem(.separator())
         m.addItem(withTitle: "About", action: #selector(about), keyEquivalent: "")
         m.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -1148,9 +1147,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        if menu === sizeMenu || menu === voiceMenu {   // tick the current choice
-            for it in menu.items { it.state = (menu === sizeMenu ? sizes[it.tag].1 == height : Voice.allCases[it.tag] == voice) ? .on : .off }
-            return
+        if [sizeMenu, voiceMenu, pixelMenu].contains(menu) {   // tick the current choice
+            let cur = menu === sizeMenu ? sizes.firstIndex { $0.1 == height } : menu === voiceMenu ? Voice.allCases.firstIndex(of: voice) : pixelSize
+            menu.items.forEach { $0.state = $0.tag == cur ? .on : .off }; return
         }
         if menu === characterMenu {   // folders may have been added since the last look
             menu.removeAllItems()
@@ -1182,6 +1181,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         if !toTerminal {
             menu.addItem(.separator())
             menu.addItem(withTitle: "New session in folder…", action: #selector(newSessionInFolder), keyEquivalent: "").target = self
+            menu.addItem(withTitle: "Open in Terminal", action: nil, keyEquivalent: "").submenu = terminalMenu
         }
     }
     func switchTo(_ t: Target) {
@@ -1205,7 +1205,6 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
     @objc func openInTerminal(_ item: NSMenuItem) { resumeInTerminal(sessions[item.tag]) }
     @objc func stopAgent() { agent.interrupt() }
-    @objc func openChat() { if input.isHidden { toggleInput() } }
     func setTop(_ on: Bool) { window.level = on ? .floating : .normal; UserDefaults.standard.set(on, forKey: "onTop") }
     func setFade(_ on: Bool) { fadeOnHover = on; UserDefaults.standard.set(on, forKey: "fadeOnHover") }
     func setPixel(_ i: Int) {
@@ -1233,6 +1232,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
     @objc func pickSize(_ item: NSMenuItem) { resize(sizes[item.tag].1); settings?.reload() }
     @objc func pickVoice(_ item: NSMenuItem) { setVoice(Voice.allCases[item.tag]); settings?.reload() }
+    @objc func pickPixel(_ item: NSMenuItem) { setPixel(item.tag) }
     @objc func pickCharacter(_ item: NSMenuItem) { if let dir = item.representedObject as? URL { setCharacter(item.title, dir) } }
     func switchCharacter(_ name: String, _ s: Sprite) {
         UserDefaults.standard.set(name, forKey: "character")
@@ -1261,7 +1261,6 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         NSWorkspace.shared.open(charactersDir)
     }
     @objc func openSettings() { settings = settings ?? SettingsPanel(self); settings!.show() }
-    @objc func toggleShow() { window.isVisible ? window.orderOut(nil) : window.orderFrontRegardless() }
     @objc func about() {
         let a = NSAlert()
         a.messageText = "Claude desktop pet"
