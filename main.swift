@@ -87,7 +87,13 @@ func blipSound(_ f: Double, pulse: Bool = false) -> NSSound {
 /// The talking voice, picked in the menu.
 enum Voice: String, CaseIterable {
     case off, soft, chip
-    var title: String { [.off: "Off", .soft: "Soft", .chip: "8-bit"][self]! }
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .soft: return "Soft"
+        case .chip: return "8-bit"
+        }
+    }
     var gap: Double { self == .chip ? 0 : 0.18 }   // least time between two blips
     static func saved() -> Voice {   // read once at launch; "sound" = false is the old Sound effects switch
         Voice(rawValue: UserDefaults.standard.string(forKey: "voice") ?? "")
@@ -429,13 +435,14 @@ func recentSessions(days: Double = 7, limit: Int = 12) -> [Session] {
 }
 
 /// Opens Terminal in the session's directory and runs `claude --resume` there (a .command file needs no extra permissions).
-func resumeInTerminal(_ s: Target) {
+func resumeInTerminal(_ t: Target) {
+    guard let id = t.id else { return }
     let q = { (x: String) in "'" + x.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-    let env = s.dir.flatMap(configEnv).map { "CLAUDE_CONFIG_DIR=\(q($0)) " } ?? "unset CLAUDE_CONFIG_DIR; "
-    let script = "#!/bin/zsh -l\ncd \(q(s.cwd)) && \(env)exec claude --resume \(s.id!)\n"
+    let env = t.dir.flatMap(configEnv).map { "CLAUDE_CONFIG_DIR=\(q($0)) " } ?? "unset CLAUDE_CONFIG_DIR; "
+    let script = "#!/bin/zsh -l\ncd \(q(t.cwd)) && \(env)exec claude --resume \(id)\n"
     let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("claude-pixel-pet")
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    let file = dir.appendingPathComponent("resume-\(s.id!.prefix(8)).command")
+    let file = dir.appendingPathComponent("resume-\(id.prefix(8)).command")
     try? script.write(to: file, atomically: true, encoding: .utf8)
     try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
     NSWorkspace.shared.open(file)
@@ -708,18 +715,20 @@ final class SettingsPanel: NSObject {
         window.title = "Claude Pet Settings"; window.contentView = box; window.isReleasedWhenClosed = false; window.collectionBehavior = .moveToActiveSpace
         window.level = .floating; window.setContentSize(box.fittingSize); window.center()
     }
-    func show() { reload(); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil) }
-    func reload() {
-        size.selectItem(at: app.sizes.firstIndex { $0.1 == app.height } ?? -1)
-        character.removeAllItems()
-        for c in characters() { character.addItem(withTitle: c.name); character.lastItem?.representedObject = c.dir }
+    func show() { reload(characters: true); NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil) }
+    func reload(characters scan: Bool = false) {   // scan: list the characters folder again (on show, and after a switch, which may follow an add)
+        size.selectItem(at: app.sizeIndex ?? -1)
+        if scan {
+            character.removeAllItems()
+            for c in characters() { character.addItem(withTitle: c.name); character.lastItem?.representedObject = c.dir }
+        }
         character.selectItem(withTitle: app.currentCharacter)
         preview.sprite = app.view.sprite
-        voice.selectedSegment = Voice.allCases.firstIndex(of: app.voice) ?? 0
+        voice.selectedSegment = app.voiceIndex
         top.state = app.window.level == .floating ? .on : .off; fade.state = app.fadeOnHover ? .on : .off
         level.selectedSegment = app.pixelSize; opacity.doubleValue = Double(app.opacity)
     }
-    @objc func sizeChanged() { app.resize(app.sizes[size.indexOfSelectedItem].1) }
+    @objc func sizeChanged() { app.setSize(size.indexOfSelectedItem) }
     @objc func characterChanged() { if let dir = character.selectedItem?.representedObject as? URL { app.setCharacter(character.titleOfSelectedItem!, dir) } }
     @objc func voiceChanged() { app.setVoice(Voice.allCases[voice.selectedSegment]) }
     @objc func topChanged() { app.setTop(top.state == .on) }
@@ -771,9 +780,21 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     var fadeOnHover = UserDefaults.standard.bool(forKey: "fadeOnHover")
     var opacity = CGFloat(UserDefaults.standard.object(forKey: "opacity") as? Double ?? 1)
     let pixelSizes: [(String, Int?)] = [("Off", nil), ("Fine", 2), ("Medium", 3), ("Coarse", 4)]   // block size in source pixels
-    var pixelSize = min(UserDefaults.standard.object(forKey: "pixelSize") as? Int   // before: a Pixel art switch and a separate level
-        ?? (UserDefaults.standard.object(forKey: "pixelArt") as? Bool ?? true ? UserDefaults.standard.integer(forKey: "pixelLevel") + 1 : 0), 3)
+    var pixelSize = App.savedPixelSize()
+    static func savedPixelSize() -> Int {   // before "pixelSize": a Pixel art switch (on by default) and a level of 0 to 2
+        let d = UserDefaults.standard
+        if let i = d.object(forKey: "pixelSize") as? Int { return min(max(i, 0), 3) }
+        return d.object(forKey: "pixelArt") as? Bool ?? true ? min(d.integer(forKey: "pixelLevel"), 2) + 1 : 0
+    }
     var block: Int? { pixelSizes[pixelSize].1 }
+    var sizeIndex: Int? { sizes.firstIndex { $0.1 == height } }
+    var voiceIndex: Int { Voice.allCases.firstIndex(of: voice)! }
+    /// The settings with a fixed list of choices, for the menu-bar submenus (Settings has its own controls for them).
+    lazy var choices: [(title: String, options: [String], current: () -> Int?, set: (Int) -> Void)] = [
+        ("Size", sizes.map(\.0), { [unowned self] in sizeIndex }, { [unowned self] in setSize($0) }),
+        ("Pixel Size", pixelSizes.map(\.0), { [unowned self] in pixelSize }, { [unowned self] in setPixel($0) }),
+        ("Voice", Voice.allCases.map(\.title), { [unowned self] in voiceIndex }, { [unowned self] in setVoice(Voice.allCases[$0]) })]
+    var choiceMenus: [NSMenu] = []
     var settings: SettingsPanel?, spriteGen = 0   // spriteGen numbers the sprite builds, so a slow old one can't replace a newer
     var currentCharacter: String { UserDefaults.standard.string(forKey: "character") ?? "Claude" }
     let relative: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f }()
@@ -1110,7 +1131,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     // menu
     var usageItems: [NSMenuItem] = []
-    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), characterMenu = NSMenu(), sizeMenu = NSMenu(), voiceMenu = NSMenu(), pixelMenu = NSMenu()
+    var sessionLabel: NSMenuItem!, sessionMenu = NSMenu(), characterMenu = NSMenu()
     var sessions: [Session] = []
     func refreshSessions() {   // off the main thread; the submenus show the last result
         pollQueue.async { let s = recentSessions(); DispatchQueue.main.async { self.sessions = s } }
@@ -1122,18 +1143,16 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         m.addItem(withTitle: "Today's usage (output tokens in the icon)", action: nil, keyEquivalent: "")
         m.addItem(.separator())
         sessionLabel = m.addItem(withTitle: "", action: nil, keyEquivalent: "")
-        m.addItem(withTitle: "Session", action: nil, keyEquivalent: "").submenu = switchMenu
+        m.addItem(withTitle: "Session", action: nil, keyEquivalent: "").submenu = sessionMenu
         m.addItem(withTitle: "Stop", action: #selector(stopAgent), keyEquivalent: "")
-        for (menu, titles, action) in [(sizeMenu, sizes.map(\.0), #selector(pickSize(_:))), (voiceMenu, Voice.allCases.map(\.title), #selector(pickVoice(_:))),
-                                       (pixelMenu, pixelSizes.map(\.0), #selector(pickPixel(_:)))] {
-            for (i, t) in titles.enumerated() { let it = menu.addItem(withTitle: t, action: action, keyEquivalent: ""); it.tag = i; it.target = self }
-        }
-        [switchMenu, characterMenu, sizeMenu, voiceMenu, pixelMenu].forEach { $0.delegate = self }
+        [sessionMenu, characterMenu].forEach { $0.delegate = self }
         m.addItem(.separator())
         m.addItem(withTitle: "Character", action: nil, keyEquivalent: "").submenu = characterMenu
-        m.addItem(withTitle: "Size", action: nil, keyEquivalent: "").submenu = sizeMenu
-        m.addItem(withTitle: "Pixel Size", action: nil, keyEquivalent: "").submenu = pixelMenu
-        m.addItem(withTitle: "Voice", action: nil, keyEquivalent: "").submenu = voiceMenu
+        for c in choices {
+            let sub = NSMenu(); sub.delegate = self; choiceMenus.append(sub)
+            for (i, t) in c.options.enumerated() { let it = sub.addItem(withTitle: t, action: #selector(pickChoice(_:)), keyEquivalent: ""); it.tag = i; it.target = self }
+            m.addItem(withTitle: c.title, action: nil, keyEquivalent: "").submenu = sub
+        }
         m.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         m.addItem(.separator())
         m.addItem(withTitle: "About", action: #selector(about), keyEquivalent: "")
@@ -1144,9 +1163,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        if [sizeMenu, voiceMenu, pixelMenu].contains(menu) {   // tick the current choice
-            let cur = menu === sizeMenu ? sizes.firstIndex { $0.1 == height } : menu === voiceMenu ? Voice.allCases.firstIndex(of: voice) : pixelSize
-            menu.items.forEach { $0.state = $0.tag == cur ? .on : .off }; return
+        if let i = choiceMenus.firstIndex(where: { $0 === menu }) {   // tick the current choice
+            let cur = choices[i].current(); menu.items.forEach { $0.state = $0.tag == cur ? .on : .off }; return
         }
         if menu === characterMenu {   // folders may have been added since the last look
             menu.removeAllItems()
@@ -1200,7 +1218,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     func setTop(_ on: Bool) { window.level = on ? .floating : .normal; UserDefaults.standard.set(on, forKey: "onTop") }
     func setFade(_ on: Bool) { fadeOnHover = on; UserDefaults.standard.set(on, forKey: "fadeOnHover") }
     func setOpacity(_ a: CGFloat) { opacity = a; UserDefaults.standard.set(Double(a), forKey: "opacity") }
+    func setSize(_ i: Int) { resize(sizes[i].1); settings?.reload() }
     func setPixel(_ i: Int) {
+        guard i != pixelSize else { return }
         pixelSize = i; UserDefaults.standard.set(i, forKey: "pixelSize")
         loadSprite(view.sprite.dir) { [weak self] in if let s = $0 { self?.view.sprite = s; self?.settings?.reload() } }
     }
@@ -1214,7 +1234,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         }
     }
     func setVoice(_ v: Voice) {
-        voice = v; UserDefaults.standard.set(v.rawValue, forKey: "voice")
+        voice = v; UserDefaults.standard.set(v.rawValue, forKey: "voice"); settings?.reload()
         say(v == .off ? "Quiet now." : "Like this?")
     }
     func setCharacter(_ name: String, _ dir: URL) {
@@ -1223,13 +1243,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             self?.switchCharacter(name, s)
         }
     }
-    @objc func pickSize(_ item: NSMenuItem) { resize(sizes[item.tag].1); settings?.reload() }
-    @objc func pickVoice(_ item: NSMenuItem) { setVoice(Voice.allCases[item.tag]); settings?.reload() }
-    @objc func pickPixel(_ item: NSMenuItem) { setPixel(item.tag) }
+    @objc func pickChoice(_ item: NSMenuItem) { if let i = choiceMenus.firstIndex(where: { $0 === item.menu }) { choices[i].set(item.tag) } }
     @objc func pickCharacter(_ item: NSMenuItem) { if let dir = item.representedObject as? URL { setCharacter(item.title, dir) } }
     func switchCharacter(_ name: String, _ s: Sprite) {
         UserDefaults.standard.set(name, forKey: "character")
-        view.sprite = s; resize(height); settings?.reload()
+        view.sprite = s; resize(height); settings?.reload(characters: true)
     }
     /// Copies a chosen folder into the characters folder (named after it) and switches to it. It needs closed.png;
     /// the other poses are optional (see README).
