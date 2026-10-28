@@ -12,7 +12,7 @@ A small pixel-art Claude that lives on your macOS desktop. You can chat with it,
 |---|---|
 | Click the pet | open the input box; Enter sends, Esc closes. Left empty for 30 s, it closes by itself |
 | Right-click the pet | usage panel: plan limits, today's tokens, what's running |
-| Drag the pet | move it (clicks on the transparent area around her go through) |
+| Drag the pet | move it; she opens there next time (clicks on the transparent area around her go through) |
 | Menu-bar ✦ | Chat, Switch session, Stop, Open in Terminal, Character, Settings… (⌘,), Hide / Show, Quit |
 
 **Stop** interrupts the turn the pet is running right now, like Esc in Claude Code. The session stays attached, so you can send the next message. Sessions open in your terminal or IDE are not affected.
@@ -40,7 +40,7 @@ A small pixel-art Claude that lives on your macOS desktop. You can chat with it,
     sleep.png  work.png  stretch.png    full-body poses: dozing, writing, stretching
   ```
   Every PNG but `closed.png` is optional; a missing one shows `closed.png` (a missing sleep, work or stretch shows blink_closed, read or yawn). Face frames are the same size as `closed.png` with only the face changed, so nothing jumps. The full-body poses may be bigger (raised arms): they are drawn at the same scale with the same bottom centre. [docs/character-pipeline.md](docs/character-pipeline.md) shows how the outfits were made, including generating the faces from Claude's.
-- Drag the pet to move it. The transparent area around the character is click-through. Size (in Settings) is Small, Medium or Large. It can stay on top, shows on every desktop, and has no Dock icon. With **See-through on hover** checked she fades to 30% while the pointer is over her (and back when it leaves), so you can see what is behind; she still takes clicks.
+- Drag the pet to move it; she reopens where you left her. The transparent area around the character is click-through. Size (in Settings) is Small, Medium or Large. It can stay on top, shows on every desktop, and has no Dock icon. With **See-through on hover** checked she fades to 30% while the pointer is over her (and back when it leaves), so you can see what is behind; she still takes clicks.
 
 Activity and today's tokens come from reading the local transcripts in `~/.claude/projects/**/*.jsonl`. The only network traffic is the chat, which goes through your own `claude` CLI, and, while the usage panel is open, at most one request a minute per account to `api.anthropic.com/api/oauth/usage` (the endpoint Claude Code's own `/usage` calls) with that account's login. The token is read from the keychain and not stored anywhere else. That endpoint is undocumented, so the plan limits can stop working after a Claude Code update.
 

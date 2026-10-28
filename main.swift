@@ -809,6 +809,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         agent.onEvent = { [weak self] e in self?.agentEvent(e) }
         agent.onSession = { [weak self] id in if self?.agent.target.tools == false { self?.petChatID = id } }
         monitor.ignoreSession = { [weak self] in self?.agent.target.id }
+        window.setContentSize(petSize(height))   // borderless: setFrameUsingName restores only the origin
         var restored = window.setFrameUsingName("pet")
         if !restored, let s = UserDefaults.standard.string(forKey: "origin") {   // position saved by v0.1
             window.setFrameOrigin(NSPointFromString(s)); restored = true
@@ -828,12 +829,14 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.say("Hello. Click me to chat.") }
     }
 
+    func petSize(_ h: CGFloat) -> NSSize { NSSize(width: max(h * view.sprite.aspect, 300), height: h + headroom) }
+
     func resize(_ h: CGFloat, keepBottom: Bool = true) {
-        let w = max(h * view.sprite.aspect, 300), total = h + headroom
+        let size = petSize(h), w = size.width
         let origin: NSPoint
         if keepBottom { origin = NSPoint(x: window.frame.midX - w / 2, y: window.frame.minY) }
         else { let v = NSScreen.main!.visibleFrame; origin = NSPoint(x: v.maxX - w - 40, y: v.minY + 10) }
-        window.setFrame(NSRect(origin: origin, size: NSSize(width: w, height: total)), display: true)
+        window.setFrame(NSRect(origin: origin, size: size), display: true)
         window.saveFrame(usingName: "pet")
         view.spriteHeight = h
         input.frame = NSRect(x: 8, y: h + 4, width: w - 16, height: 24)
