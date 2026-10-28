@@ -1113,7 +1113,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     // menu
     var usageItems: [NSMenuItem] = []
-    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), characterMenu = NSMenu()
+    var sessionLabel: NSMenuItem!, switchMenu = NSMenu(), terminalMenu = NSMenu(), characterMenu = NSMenu(), sizeMenu = NSMenu(), voiceMenu = NSMenu()
     var sessions: [Session] = []
     func refreshSessions() {   // off the main thread; the submenus show the last result
         pollQueue.async { let s = recentSessions(); DispatchQueue.main.async { self.sessions = s } }
@@ -1129,9 +1129,14 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         m.addItem(withTitle: "Switch session", action: nil, keyEquivalent: "").submenu = switchMenu
         m.addItem(withTitle: "Stop", action: #selector(stopAgent), keyEquivalent: "")
         m.addItem(withTitle: "Open in Terminal", action: nil, keyEquivalent: "").submenu = terminalMenu
-        switchMenu.delegate = self; terminalMenu.delegate = self; characterMenu.delegate = self
+        for (i, t) in sizes.map(\.0).enumerated() { sizeMenu.addItem(withTitle: t, action: #selector(pickSize(_:)), keyEquivalent: "").tag = i }
+        for (i, t) in Voice.allCases.map(\.title).enumerated() { voiceMenu.addItem(withTitle: t, action: #selector(pickVoice(_:)), keyEquivalent: "").tag = i }
+        (sizeMenu.items + voiceMenu.items).forEach { $0.target = self }
+        [switchMenu, terminalMenu, characterMenu, sizeMenu, voiceMenu].forEach { $0.delegate = self }
         m.addItem(.separator())
         m.addItem(withTitle: "Character", action: nil, keyEquivalent: "").submenu = characterMenu
+        m.addItem(withTitle: "Size", action: nil, keyEquivalent: "").submenu = sizeMenu
+        m.addItem(withTitle: "Voice", action: nil, keyEquivalent: "").submenu = voiceMenu
         m.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         m.addItem(withTitle: "Hide / Show", action: #selector(toggleShow), keyEquivalent: "")
         m.addItem(.separator())
@@ -1143,6 +1148,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === sizeMenu || menu === voiceMenu {   // tick the current choice
+            for it in menu.items { it.state = (menu === sizeMenu ? sizes[it.tag].1 == height : Voice.allCases[it.tag] == voice) ? .on : .off }
+            return
+        }
         if menu === characterMenu {   // folders may have been added since the last look
             menu.removeAllItems()
             for c in characters() {
@@ -1222,6 +1231,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             self?.switchCharacter(name, s)
         }
     }
+    @objc func pickSize(_ item: NSMenuItem) { resize(sizes[item.tag].1); settings?.reload() }
+    @objc func pickVoice(_ item: NSMenuItem) { setVoice(Voice.allCases[item.tag]); settings?.reload() }
     @objc func pickCharacter(_ item: NSMenuItem) { if let dir = item.representedObject as? URL { setCharacter(item.title, dir) } }
     func switchCharacter(_ name: String, _ s: Sprite) {
         UserDefaults.standard.set(name, forKey: "character")

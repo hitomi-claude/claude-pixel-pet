@@ -13,7 +13,7 @@ A small pixel-art Claude that lives on your macOS desktop. You can chat with it,
 | Click the pet | open the input box; Enter sends, Esc closes. Left empty for 30 s, it closes by itself |
 | Right-click the pet | usage panel: plan limits, today's tokens, what's running |
 | Drag the pet | move it; she opens there next time (clicks on the transparent area around her go through) |
-| Menu-bar ✦ | Chat, Switch session, Stop, Open in Terminal, Character, Settings… (⌘,), Hide / Show, Quit |
+| Menu-bar ✦ | Chat, Switch session, Stop, Open in Terminal, Character, Size, Voice, Settings… (⌘,), Hide / Show, Quit |
 
 **Stop** interrupts the turn the pet is running right now, like Esc in Claude Code. The session stays attached, so you can send the next message. Sessions open in your terminal or IDE are not affected.
 
