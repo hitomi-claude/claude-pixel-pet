@@ -86,14 +86,8 @@ func blipSound(_ f: Double, pulse: Bool = false) -> NSSound {
 
 /// The talking voice, picked in the menu.
 enum Voice: String, CaseIterable {
-    case soft, chip, off
-    var title: String {
-        switch self {
-        case .soft: return "Soft (every other character)"
-        case .chip: return "8-bit (every character)"
-        case .off: return "Off"
-        }
-    }
+    case off, soft, chip
+    var title: String { [.off: "Off", .soft: "Soft", .chip: "8-bit"][self]! }
     var gap: Double { self == .chip ? 0 : 0.18 }   // least time between two blips
     static func saved() -> Voice {   // read once at launch; "sound" = false is the old Sound effects switch
         Voice(rawValue: UserDefaults.standard.string(forKey: "voice") ?? "")
@@ -687,17 +681,18 @@ final class SpritePreview: NSView {
 final class SettingsPanel: NSObject {
     unowned let app: App
     let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
-    let size = NSPopUpButton(), character = NSPopUpButton(), voice = NSPopUpButton(), preview = SpritePreview()
+    let size = NSPopUpButton(), character = NSPopUpButton(), preview = SpritePreview()
     let top: NSButton, fade: NSButton
-    let level: NSSegmentedControl, opacity = NSSlider(value: 1, minValue: 0.3, maxValue: 1, target: nil, action: nil)
+    let voice: NSSegmentedControl, level: NSSegmentedControl, opacity = NSSlider(value: 1, minValue: 0.3, maxValue: 1, target: nil, action: nil)
 
     init(_ app: App) {
         self.app = app
         top = NSButton(checkboxWithTitle: "Always on top", target: nil, action: nil)
         fade = NSButton(checkboxWithTitle: "See-through on hover", target: nil, action: nil)
+        voice = NSSegmentedControl(labels: Voice.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
         level = NSSegmentedControl(labels: app.pixelSizes.map(\.0), trackingMode: .selectOne, target: nil, action: nil)
         super.init()
-        size.addItems(withTitles: app.sizes.map(\.0)); voice.addItems(withTitles: Voice.allCases.map(\.title))
+        size.addItems(withTitles: app.sizes.map(\.0))
         for (c, a) in [(size, #selector(sizeChanged)), (character, #selector(characterChanged)), (voice, #selector(voiceChanged))] { c.target = self; c.action = a }
         for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged))] { c.target = self; c.action = a }
         level.target = self; level.action = #selector(pixelChanged); opacity.target = self; opacity.action = #selector(opacityChanged)
@@ -720,13 +715,13 @@ final class SettingsPanel: NSObject {
         for c in characters() { character.addItem(withTitle: c.name); character.lastItem?.representedObject = c.dir }
         character.selectItem(withTitle: app.currentCharacter)
         preview.sprite = app.view.sprite
-        voice.selectItem(at: Voice.allCases.firstIndex(of: app.voice) ?? 0)
+        voice.selectedSegment = Voice.allCases.firstIndex(of: app.voice) ?? 0
         top.state = app.window.level == .floating ? .on : .off; fade.state = app.fadeOnHover ? .on : .off
         level.selectedSegment = app.pixelSize; opacity.doubleValue = Double(app.opacity)
     }
     @objc func sizeChanged() { app.resize(app.sizes[size.indexOfSelectedItem].1) }
     @objc func characterChanged() { if let dir = character.selectedItem?.representedObject as? URL { app.setCharacter(character.titleOfSelectedItem!, dir) } }
-    @objc func voiceChanged() { app.setVoice(Voice.allCases[voice.indexOfSelectedItem]) }
+    @objc func voiceChanged() { app.setVoice(Voice.allCases[voice.selectedSegment]) }
     @objc func topChanged() { app.setTop(top.state == .on) }
     @objc func fadeChanged() { app.setFade(fade.state == .on) }
     @objc func opacityChanged() { app.setOpacity(CGFloat(opacity.doubleValue)) }
