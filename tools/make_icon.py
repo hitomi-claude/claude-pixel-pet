@@ -17,7 +17,7 @@ ap.add_argument("--png"); ap.add_argument("--square"); ap.add_argument("--pixel"
 args = ap.parse_args()
 
 src = Image.open(args.sprite).convert("RGBA")
-if args.pixel:   # as the app's Pixelate: a block's mean, or its dark pixels' when they fill 30 % of it (outlines survive), then 64 colours
+if args.pixel:   # a copy of Pixelate.blocks in main.swift (keep them in step); the 64 colours come from Pillow's median cut, not the app's
     b, (w, h) = args.pixel, src.size; ox, oy = (w // 2) % b, h % b; bw, bh = (w - ox) // b, (h - oy) // b
     a = np.asarray(src, np.float32)[oy:oy + bh * b, ox:ox + bw * b].reshape(bh, b, bw, b, 4).transpose(0, 2, 1, 3, 4).reshape(bh, bw, b * b, 4)
     rgb, al = a[..., :3], a[..., 3:] / 255
@@ -28,7 +28,7 @@ if args.pixel:   # as the app's Pixelate: a block's mean, or its dark pixels' wh
     n = dark.sum(2); dmean = (rgb * dark[..., None]).sum(2) / np.maximum(n, 1)[..., None]
     col = np.where((n >= 0.3 * b * b)[..., None], dmean, mean).clip(0, 255).astype(np.uint8)
     blocks = Image.fromarray(col).quantize(64, method=Image.Quantize.MEDIANCUT).convert("RGBA")
-    blocks.putalpha(Image.fromarray(np.where(solid, 255, 0).astype(np.uint8)))
+    blocks.putalpha(Image.fromarray((solid * 255).astype(np.uint8)))
     src = Image.new("RGBA", (w, h), (0, 0, 0, 0)); src.paste(blocks.resize((bw * b, bh * b), Image.NEAREST), (ox, oy))
 k = src.height / 600
 cx = src.width / 2   # the head is centred on the sprite
@@ -41,8 +41,9 @@ def render(W, square=False):   # the icon at W px: Apple's grid scaled from 1024
     size = W - 2 * inset
     g = np.linspace(0, 1, size)[:, None, None]
     plate = Image.fromarray(np.broadcast_to(top * (1 - g) + bottom * g, (size, size, 4)).astype(np.uint8))
-    art = head.resize((round(size * .96),) * 2, Image.LANCZOS)
-    if W >= 64: art = art.quantize(256, method=Image.Quantize.FASTOCTREE).convert("RGBA")   # resampling leaves ~170k colours
+    side = round(size * .96); sharp = args.pixel and side >= head.width / args.pixel   # at least a pixel per block: keep the blocks
+    art = head.resize((side,) * 2, Image.NEAREST if sharp else Image.LANCZOS)
+    if W >= 64 and not sharp: art = art.quantize(256, method=Image.Quantize.FASTOCTREE).convert("RGBA")   # resampling leaves ~170k colours
     plate.alpha_composite(art, ((size - art.width) // 2, size - art.height))   # sits on the bottom edge
     mask = Image.new("L", (size, size), 0); ImageDraw.Draw(mask).rounded_rectangle((0, 0, size - 1, size - 1), radius, fill=255)
     icon = Image.new("RGBA", (W, W), (0, 0, 0, 0)); icon.paste(plate, (inset, inset), mask)
