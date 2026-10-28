@@ -688,24 +688,23 @@ final class SettingsPanel: NSObject {
     unowned let app: App
     let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let size = NSPopUpButton(), character = NSPopUpButton(), voice = NSPopUpButton(), preview = SpritePreview()
-    let top: NSButton, fade: NSButton, pixel: NSButton
+    let top: NSButton, fade: NSButton
     let level: NSSegmentedControl
 
     init(_ app: App) {
         self.app = app
         top = NSButton(checkboxWithTitle: "Always on top", target: nil, action: nil)
         fade = NSButton(checkboxWithTitle: "See-through on hover", target: nil, action: nil)
-        pixel = NSButton(checkboxWithTitle: "Pixel art", target: nil, action: nil)
         level = NSSegmentedControl(labels: app.pixelSizes.map(\.0), trackingMode: .selectOne, target: nil, action: nil)
         super.init()
         size.addItems(withTitles: app.sizes.map(\.0)); voice.addItems(withTitles: Voice.allCases.map(\.title))
         for (c, a) in [(size, #selector(sizeChanged)), (character, #selector(characterChanged)), (voice, #selector(voiceChanged))] { c.target = self; c.action = a }
-        for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged)), (pixel, #selector(pixelChanged))] { c.target = self; c.action = a }
+        for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged))] { c.target = self; c.action = a }
         level.target = self; level.action = #selector(pixelChanged)
         let add = NSButton(title: "Add…", target: app, action: #selector(App.addCharacter)), folder = NSButton(title: "Open Folder…", target: app, action: #selector(App.openCharacters))
         let label = { (t: String) in NSTextField(labelWithString: t) }
         let grid = NSGridView(views: [
-            [label("Size"), size], [label("Character"), character], [NSView(), NSStackView(views: [add, folder])], [label("Voice"), voice], [NSView(), top], [NSView(), fade], [NSView(), pixel], [label("Pixel size"), level]])
+            [label("Size"), size], [label("Character"), character], [NSView(), NSStackView(views: [add, folder])], [label("Voice"), voice], [NSView(), top], [NSView(), fade], [label("Pixel size"), level]])
         grid.rowSpacing = 10; grid.columnSpacing = 12; grid.column(at: 0).xPlacement = .trailing
         let row = NSStackView(views: [preview, grid]); row.spacing = 24; row.alignment = .centerY
         let box = NSView(); row.translatesAutoresizingMaskIntoConstraints = false; box.addSubview(row)
@@ -723,14 +722,14 @@ final class SettingsPanel: NSObject {
         preview.sprite = app.view.sprite
         voice.selectItem(at: Voice.allCases.firstIndex(of: app.voice) ?? 0)
         top.state = app.window.level == .floating ? .on : .off; fade.state = app.fadeOnHover ? .on : .off
-        pixel.state = app.pixelArt ? .on : .off; level.selectedSegment = app.pixelLevel; level.isEnabled = app.pixelArt
+        level.selectedSegment = app.pixelSize
     }
     @objc func sizeChanged() { app.resize(app.sizes[size.indexOfSelectedItem].1) }
     @objc func characterChanged() { if let dir = character.selectedItem?.representedObject as? URL { app.setCharacter(character.titleOfSelectedItem!, dir) } }
     @objc func voiceChanged() { app.setVoice(Voice.allCases[voice.indexOfSelectedItem]) }
     @objc func topChanged() { app.setTop(top.state == .on) }
     @objc func fadeChanged() { app.setFade(fade.state == .on) }
-    @objc func pixelChanged() { level.isEnabled = pixel.state == .on; app.setPixel(pixel.state == .on, level: level.selectedSegment) }
+    @objc func pixelChanged() { app.setPixel(level.selectedSegment) }
 }
 
 final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDelegate {
@@ -774,10 +773,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     let sizes: [(String, CGFloat)] = [("Small", 160), ("Medium", 240), ("Large", 340)]
     var height: CGFloat { CGFloat(UserDefaults.standard.object(forKey: "height") as? Double ?? 240) }
     var fadeOnHover = UserDefaults.standard.bool(forKey: "fadeOnHover")
-    var pixelArt = UserDefaults.standard.object(forKey: "pixelArt") as? Bool ?? true
-    let pixelSizes: [(String, Int)] = [("Fine", 2), ("Medium", 3), ("Coarse", 4)]   // block size in source pixels
-    var pixelLevel = min(UserDefaults.standard.integer(forKey: "pixelLevel"), 2)
-    var block: Int? { pixelArt ? pixelSizes[pixelLevel].1 : nil }
+    let pixelSizes: [(String, Int?)] = [("Off", nil), ("Fine", 2), ("Medium", 3), ("Coarse", 4)]   // block size in source pixels
+    var pixelSize = min(UserDefaults.standard.object(forKey: "pixelSize") as? Int   // before: a Pixel art switch and a separate level
+        ?? (UserDefaults.standard.object(forKey: "pixelArt") as? Bool ?? true ? UserDefaults.standard.integer(forKey: "pixelLevel") + 1 : 0), 3)
+    var block: Int? { pixelSizes[pixelSize].1 }
     var settings: SettingsPanel?, spriteGen = 0   // spriteGen numbers the sprite builds, so a slow old one can't replace a newer
     var currentCharacter: String { UserDefaults.standard.string(forKey: "character") ?? "Claude" }
     let relative: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f }()
@@ -1200,9 +1199,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     @objc func openChat() { if input.isHidden { toggleInput() } }
     func setTop(_ on: Bool) { window.level = on ? .floating : .normal; UserDefaults.standard.set(on, forKey: "onTop") }
     func setFade(_ on: Bool) { fadeOnHover = on; UserDefaults.standard.set(on, forKey: "fadeOnHover") }
-    func setPixel(_ on: Bool, level: Int) {
-        pixelArt = on; pixelLevel = level
-        UserDefaults.standard.set(on, forKey: "pixelArt"); UserDefaults.standard.set(level, forKey: "pixelLevel")
+    func setPixel(_ i: Int) {
+        pixelSize = i; UserDefaults.standard.set(i, forKey: "pixelSize")
         loadSprite(view.sprite.dir) { [weak self] in if let s = $0 { self?.view.sprite = s; self?.settings?.reload() } }
     }
     /// Builds a sprite off the main thread (pixelating takes a few hundred ms), then hands it back on the main thread,
