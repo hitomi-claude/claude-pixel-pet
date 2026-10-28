@@ -809,7 +809,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         agent.onEvent = { [weak self] e in self?.agentEvent(e) }
         agent.onSession = { [weak self] id in if self?.agent.target.tools == false { self?.petChatID = id } }
         monitor.ignoreSession = { [weak self] in self?.agent.target.id }
-        window.setContentSize(petSize(height))   // the saved frame only gives a borderless window its origin: resize() centres on this width
+        window.setContentSize(petSize(height))   // borderless: setFrameUsingName restores only the origin
         var restored = window.setFrameUsingName("pet")
         if !restored, let s = UserDefaults.standard.string(forKey: "origin") {   // position saved by v0.1
             window.setFrameOrigin(NSPointFromString(s)); restored = true
