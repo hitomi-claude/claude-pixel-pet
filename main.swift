@@ -130,18 +130,17 @@ struct Tune: RandomNumberGenerator {
 enum Pose: String, CaseIterable {
     case closed, half, open, blink_half, blink_closed, read, yawn, surprised, sleep, work, stretch, peek_bottom, peek_left, peek_right,
          peek_bottom_closed, peek_left_closed, peek_right_closed
-    static let peeks: [Pose] = [.peek_bottom, .peek_left, .peek_right]
+    static let peeks: [Pose: Pose] = [.peek_bottom: .peek_bottom_closed, .peek_left: .peek_left_closed, .peek_right: .peek_right_closed]   // and with the eyes closed
     func png(in dir: URL) -> URL { dir.appendingPathComponent("\(rawValue).png") }
     var standIn: Pose? {   // shown when a character lacks this full-body pose
         switch self {
         case .sleep: .blink_closed; case .work: .read; case .stretch: .yawn
-        case .peek_bottom_closed: .peek_bottom; case .peek_left_closed: .peek_left; case .peek_right_closed: .peek_right
-        default: nil
+        default: Pose.peeks.first { $0.value == self }?.key
         }
     }
     /// The frame shown for this pose while docked: the eyes shut through a blink, and asleep on the bottom edge.
     func peek(_ dock: Pose) -> Pose {
-        self == .blink_half || self == .blink_closed || self == .sleep && dock == .peek_bottom ? Pose(rawValue: dock.rawValue + "_closed")! : dock
+        self == .blink_half || self == .blink_closed || self == .sleep && dock == .peek_bottom ? Pose.peeks[dock]! : dock
     }
     var body: Pose { standIn == nil ? .closed : self }   // the full-body pose; face frames all stand
 }
@@ -235,7 +234,7 @@ final class Sprite {
     let frames: [Pose: NSImage]
     let size: [Pose: CGSize]   // each frame's size relative to closed.png; full-body poses can be bigger (raised arms)
     let aspect: CGFloat
-    private let masks: [Pose: (w: Int, h: Int, bits: [Bool])]   // opaque pixels of the neutral and the peek frames, for click-through
+    private let masks: [Pose: (w: Int, h: Int, alpha: [UInt8])]   // of the neutral and the open peek frames, for click-through
     init?(_ dir: URL, block: Int?) {
         guard let base = NSImage(contentsOf: Pose.closed.png(in: dir)),
               let cg = base.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
@@ -250,25 +249,27 @@ final class Sprite {
         frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, own[$0] ?? $0.standIn.flatMap { own[$0] } ?? own[.closed]!) })
         aspect = CGFloat(cg.width) / CGFloat(cg.height)
         size = frames.mapValues { im in im.representations.first.map { CGSize(width: CGFloat($0.pixelsWide) / CGFloat(cg.width), height: CGFloat($0.pixelsHigh) / CGFloat(cg.height)) } ?? CGSize(width: 1, height: 1) }
-        masks = Dictionary(uniqueKeysWithValues: ([cg as CGImage?] + Pose.peeks.map { own[$0]?.cgImage(forProposedRect: nil, context: nil, hints: nil) })
-            .enumerated().compactMap { i, cg in cg.map { cg in
-                let w = cg.width, h = cg.height
-                var alpha = [UInt8](repeating: 0, count: w * h)   // draw into an alpha-only buffer: one pass, no per-pixel objects
-                CGContext(data: &alpha, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
-                          bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue)!.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-                return (i == 0 ? Pose.closed : Pose.peeks[i - 1], (w, h, alpha.map { $0 > 25 }))
-            } })
+        masks = Dictionary(uniqueKeysWithValues: ([.closed] + Pose.peeks.keys).compactMap { p in
+            (p == .closed ? cg : own[p]?.cgImage(forProposedRect: nil, context: nil, hints: nil)).map { (p, Sprite.alpha($0)) }
+        })
+    }
+    static func alpha(_ cg: CGImage) -> (w: Int, h: Int, alpha: [UInt8]) {   // drawn into an alpha-only buffer: one pass, no per-pixel objects
+        let w = cg.width, h = cg.height
+        var alpha = [UInt8](repeating: 0, count: w * h)
+        CGContext(data: &alpha, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+                  bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue)!.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return (w, h, alpha)
     }
     func has(_ p: Pose) -> Bool { masks[p] != nil }   // a peek frame of its own
     func headX(_ pose: Pose) -> CGFloat {   // the middle of her head across the frame (0...1): of the top tenth of it
         guard let m = masks[pose] else { return 0.5 }
-        let xs = (0..<max(m.h / 10, 1)).flatMap { y in (0..<m.w).filter { m.bits[y * m.w + $0] } }
+        let xs = (0..<max(m.h / 10, 1)).flatMap { y in (0..<m.w).filter { m.alpha[y * m.w + $0] > 25 } }
         return xs.isEmpty ? 0.5 : CGFloat(xs.reduce(0, +)) / CGFloat(xs.count * m.w)
     }
     func opaque(_ pose: Pose, atUnit p: CGPoint) -> Bool {   // p in 0...1, origin bottom-left
         guard let m = masks[pose] else { return false }
         let x = Int(p.x * CGFloat(m.w)), y = Int((1 - p.y) * CGFloat(m.h))
-        return x >= 0 && y >= 0 && x < m.w && y < m.h && m.bits[y * m.w + x]
+        return x >= 0 && y >= 0 && x < m.w && y < m.h && m.alpha[y * m.w + x] > 25
     }
 }
 
@@ -313,7 +314,7 @@ final class PetView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         let p = convert(point, from: superview)
         for v in subviews.reversed() where !v.isHidden && v.frame.contains(p) { return v.hitTest(point) }
-        let (pose, r) = dock == nil ? (Pose.closed, spriteRect) : shown
+        let (pose, r) = dock.map { ($0, shown.rect) } ?? (.closed, spriteRect)   // a closed-eye peek has its open one's outline
         guard r.contains(p) else { return nil }
         return sprite.opaque(pose, atUnit: CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)) ? self : nil
     }
@@ -854,7 +855,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         view = PetView(sprite: characters().first { $0.name == currentCharacter }
             .flatMap { Sprite($0.dir, block: block) } ?? Sprite(Bundle.main.resourceURL!, block: block)!)
         view.onClick = { [weak self] in self?.toggleInput() }
-        view.onMoved = { [weak self] in self?.dockToEdge(); self?.window.saveFrame(usingName: "pet") }
+        view.onMoved = { [weak self] in self?.dockToEdge() }
         view.onDragStart = { [weak self] in self?.layoutOverlays() }
         view.dock = UserDefaults.standard.string(forKey: "dock").flatMap(Pose.init)
         view.onTouch = { [weak self] in guard let self else { return }; self.poke(self.startle) }
@@ -897,21 +898,20 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.setFrame(NSRect(origin: origin, size: size), display: true)
         view.spriteHeight = h
         dockToEdge()
-        window.saveFrame(usingName: "pet")
         UserDefaults.standard.set(Double(h), forKey: "height")
     }
 
-    /// Docks her to the screen edge she's pushed past by a quarter of her size (if dockEdges is on), showing her peeking from
-    /// there with the cut edge on the screen's edge; anywhere else she stands.
+    /// Docks her to the screen edge she's pushed past by a quarter of her size, or keeps her docked while flush with it (if
+    /// dockEdges is on), showing her peeking from there with the cut edge on the screen's edge; anywhere else she stands. Saves the frame.
     func dockToEdge() {
         let v = (window.screen ?? NSScreen.main!).visibleFrame, r = window.convertToScreen(view.convert(view.shown.rect, to: nil))
         let past: [(Pose, CGFloat)] = [(.peek_bottom, (v.minY - r.minY) / r.height), (.peek_left, (v.minX - r.minX) / r.width), (.peek_right, (r.maxX - v.maxX) / r.width)]
-        let dock = past.filter { dockEdges && view.sprite.has($0.0) && $0.1 > 0.25 }.max { $0.1 < $1.1 }?.0
+        let dock = past.filter { dockEdges && view.sprite.has($0.0) && $0.1 > ($0.0 == view.dock ? -0.02 : 0.25) }.max { $0.1 < $1.1 }?.0
         view.dock = dock; UserDefaults.standard.set(dock?.rawValue, forKey: "dock")
         var f = window.frame
         if dock != nil { f.origin.y = max(v.minY, min(f.minY, v.maxY - view.top)) }
         if dock == .peek_left { f.origin.x = v.minX } else if dock == .peek_right { f.origin.x = v.maxX - f.width }
-        window.setFrameOrigin(f.origin)
+        window.setFrameOrigin(f.origin); window.saveFrame(usingName: "pet")
         layoutOverlays()
     }
 
@@ -1272,7 +1272,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     @objc func stopAgent() { agent.interrupt() }
     func setTop(_ on: Bool) { window.level = on ? .floating : .normal; UserDefaults.standard.set(on, forKey: "onTop") }
     func setFade(_ on: Bool) { fadeOnHover = on; UserDefaults.standard.set(on, forKey: "fadeOnHover") }
-    func setDockEdges(_ on: Bool) { dockEdges = on; UserDefaults.standard.set(on, forKey: "dockEdges"); dockToEdge(); window.saveFrame(usingName: "pet") }
+    func setDockEdges(_ on: Bool) { dockEdges = on; UserDefaults.standard.set(on, forKey: "dockEdges"); dockToEdge() }
     func setOpacity(_ a: CGFloat) { opacity = a; UserDefaults.standard.set(Double(a), forKey: "opacity") }
     func setSize(_ i: Int) { resize(sizes[i].1); settings?.reload() }
     func setPixel(_ i: Int) {
