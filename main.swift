@@ -125,12 +125,23 @@ struct Tune: RandomNumberGenerator {
 // MARK: sprite
 
 /// Sprite frames, one PNG each in a character's folder. closed/half/open are the mouth while talking, then face poses,
-/// then full-body poses (sleep, work, stretch), which may be bigger than closed.png.
+/// then full-body poses (sleep, work, stretch), which may be bigger than closed.png, then the upper body peeking over the
+/// edge of the screen it's docked to, cut straight along that edge, and each with the eyes closed.
 enum Pose: String, CaseIterable {
-    case closed, half, open, blink_half, blink_closed, read, yawn, surprised, sleep, work, stretch
+    case closed, half, open, blink_half, blink_closed, read, yawn, surprised, sleep, work, stretch, peek_bottom, peek_left, peek_right,
+         peek_bottom_closed, peek_left_closed, peek_right_closed
+    static let peeks: [Pose] = [.peek_bottom, .peek_left, .peek_right]
     func png(in dir: URL) -> URL { dir.appendingPathComponent("\(rawValue).png") }
     var standIn: Pose? {   // shown when a character lacks this full-body pose
-        switch self { case .sleep: .blink_closed; case .work: .read; case .stretch: .yawn; default: nil }
+        switch self {
+        case .sleep: .blink_closed; case .work: .read; case .stretch: .yawn
+        case .peek_bottom_closed: .peek_bottom; case .peek_left_closed: .peek_left; case .peek_right_closed: .peek_right
+        default: nil
+        }
+    }
+    /// The frame shown for this pose while docked: the eyes shut through a blink, and asleep on the bottom edge.
+    func peek(_ dock: Pose) -> Pose {
+        self == .blink_half || self == .blink_closed || self == .sleep && dock == .peek_bottom ? Pose(rawValue: dock.rawValue + "_closed")! : dock
     }
     var body: Pose { standIn == nil ? .closed : self }   // the full-body pose; face frames all stand
 }
@@ -224,7 +235,7 @@ final class Sprite {
     let frames: [Pose: NSImage]
     let size: [Pose: CGSize]   // each frame's size relative to closed.png; full-body poses can be bigger (raised arms)
     let aspect: CGFloat
-    private let w: Int, h: Int, mask: [Bool]   // opaque pixels of the neutral frame, for click-through
+    private let masks: [Pose: (w: Int, h: Int, bits: [Bool])]   // opaque pixels of the neutral and the peek frames, for click-through
     init?(_ dir: URL, block: Int?) {
         guard let base = NSImage(contentsOf: Pose.closed.png(in: dir)),
               let cg = base.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
@@ -237,17 +248,27 @@ final class Sprite {
             }
         }
         frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, own[$0] ?? $0.standIn.flatMap { own[$0] } ?? own[.closed]!) })
-        w = cg.width; h = cg.height; aspect = CGFloat(w) / CGFloat(h)
+        aspect = CGFloat(cg.width) / CGFloat(cg.height)
         size = frames.mapValues { im in im.representations.first.map { CGSize(width: CGFloat($0.pixelsWide) / CGFloat(cg.width), height: CGFloat($0.pixelsHigh) / CGFloat(cg.height)) } ?? CGSize(width: 1, height: 1) }
-        var alpha = [UInt8](repeating: 0, count: w * h)   // draw into an alpha-only buffer: one pass, no per-pixel objects
-        let ctx = CGContext(data: &alpha, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
-                            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue)!
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-        mask = alpha.map { $0 > 25 }
+        masks = Dictionary(uniqueKeysWithValues: ([cg as CGImage?] + Pose.peeks.map { own[$0]?.cgImage(forProposedRect: nil, context: nil, hints: nil) })
+            .enumerated().compactMap { i, cg in cg.map { cg in
+                let w = cg.width, h = cg.height
+                var alpha = [UInt8](repeating: 0, count: w * h)   // draw into an alpha-only buffer: one pass, no per-pixel objects
+                CGContext(data: &alpha, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+                          bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue)!.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+                return (i == 0 ? Pose.closed : Pose.peeks[i - 1], (w, h, alpha.map { $0 > 25 }))
+            } })
     }
-    func opaque(atUnit p: CGPoint) -> Bool {   // p in 0...1, origin bottom-left
-        let x = Int(p.x * CGFloat(w)), y = Int((1 - p.y) * CGFloat(h))
-        return x >= 0 && y >= 0 && x < w && y < h && mask[y * w + x]
+    func has(_ p: Pose) -> Bool { masks[p] != nil }   // a peek frame of its own
+    func headX(_ pose: Pose) -> CGFloat {   // the middle of her head across the frame (0...1): of the top tenth of it
+        guard let m = masks[pose] else { return 0.5 }
+        let xs = (0..<max(m.h / 10, 1)).flatMap { y in (0..<m.w).filter { m.bits[y * m.w + $0] } }
+        return xs.isEmpty ? 0.5 : CGFloat(xs.reduce(0, +)) / CGFloat(xs.count * m.w)
+    }
+    func opaque(_ pose: Pose, atUnit p: CGPoint) -> Bool {   // p in 0...1, origin bottom-left
+        guard let m = masks[pose] else { return false }
+        let x = Int(p.x * CGFloat(m.w)), y = Int((1 - p.y) * CGFloat(m.h))
+        return x >= 0 && y >= 0 && x < m.w && y < m.h && m.bits[y * m.w + x]
     }
 }
 
@@ -259,12 +280,14 @@ final class PetView: NSView {
     var sprite: Sprite { didSet { needsDisplay = true } }
     var spriteHeight: CGFloat = 240
     var pose = Pose.closed { didSet { if pose != oldValue { needsDisplay = true } } }
+    var dock: Pose? { didSet { if dock != oldValue { needsDisplay = true } } }   // the peek frame shown instead while docked to an edge
     var bob: CGFloat = 0 { didSet { if bob != oldValue { needsDisplay = true } } }   // whole pixels only
     var fade: CGFloat = 1 { didSet { if fade != oldValue { needsDisplay = true } } }  // sprite opacity
     var onClick: (() -> Void)?
     var onMoved: (() -> Void)?
     var onRightClick: (() -> Void)?
     var onTouch: (() -> Void)?   // any click or drag
+    var onDragStart: (() -> Void)?
     private var dragStart: NSPoint?, moved = false
 
     init(sprite: Sprite) { self.sprite = sprite; super.init(frame: .zero) }
@@ -274,25 +297,37 @@ final class PetView: NSView {
         let w = spriteHeight * sprite.aspect
         return NSRect(x: (bounds.width - w) / 2, y: bob, width: w, height: spriteHeight)
     }
+    /// The frame drawn and where: the same scale and bottom centre as closed.png, or a peek frame against the bottom
+    /// and the edge it peeks from.
+    var shown: (pose: Pose, rect: NSRect) {
+        let r = spriteRect, p = dock.map(pose.peek) ?? pose, k = sprite.size[p]!, w = r.width * k.width
+        let x = dock == .peek_left ? 0 : dock == .peek_right ? bounds.width - w : r.midX - w / 2
+        return (p, NSRect(x: x, y: dock == nil ? r.minY : 0, width: w, height: r.height * k.height))
+    }
+    var top: CGFloat { dock == nil ? spriteHeight : shown.rect.maxY }   // where the overlays start
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.current?.imageInterpolation = sprite.pixel ? .none : .high
-        let r = spriteRect, k = sprite.size[pose]!   // same scale and bottom centre as closed.png
-        sprite.frames[pose]!.draw(in: NSRect(x: r.midX - r.width * k.width / 2, y: r.minY, width: r.width * k.width, height: r.height * k.height),
-                                  from: .zero, operation: .sourceOver, fraction: fade)
+        let (p, r) = shown
+        sprite.frames[p]!.draw(in: r, from: .zero, operation: .sourceOver, fraction: fade)
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
         let p = convert(point, from: superview)
         for v in subviews.reversed() where !v.isHidden && v.frame.contains(p) { return v.hitTest(point) }
-        let r = spriteRect
+        let (pose, r) = dock == nil ? (Pose.closed, spriteRect) : shown
         guard r.contains(p) else { return nil }
-        return sprite.opaque(atUnit: CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)) ? self : nil
+        return sprite.opaque(pose, atUnit: CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)) ? self : nil
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with e: NSEvent) { onTouch?(); dragStart = e.locationInWindow; moved = false }
     override func mouseDragged(with e: NSEvent) {
         guard let start = dragStart, let w = window else { return }
         let p = NSEvent.mouseLocation
-        w.setFrameOrigin(NSPoint(x: p.x - start.x, y: p.y - start.y)); moved = true
+        if !moved, let d = dock {   // she stands up while carried, with her head where it was
+            let a = shown.rect, b = spriteRect; dock = nil
+            dragStart = NSPoint(x: start.x - (a.minX + a.width * sprite.headX(d) - b.minX - b.width * sprite.headX(.closed)), y: start.y - (a.maxY - b.maxY))
+            onDragStart?()
+        }
+        w.setFrameOrigin(NSPoint(x: p.x - dragStart!.x, y: p.y - dragStart!.y)); moved = true
     }
     override func mouseUp(with e: NSEvent) {
         if moved { onMoved?() } else { onClick?() }
@@ -689,24 +724,25 @@ final class SettingsPanel: NSObject {
     unowned let app: App
     let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let size = NSPopUpButton(), character = NSPopUpButton(), preview = SpritePreview()
-    let top: NSButton, fade: NSButton
+    let top: NSButton, fade: NSButton, dock: NSButton
     let voice: NSSegmentedControl, level: NSSegmentedControl, opacity = NSSlider(value: 1, minValue: 0.3, maxValue: 1, target: nil, action: nil)
 
     init(_ app: App) {
         self.app = app
         top = NSButton(checkboxWithTitle: "Always on top", target: nil, action: nil)
         fade = NSButton(checkboxWithTitle: "See-through on hover", target: nil, action: nil)
+        dock = NSButton(checkboxWithTitle: "Peek from screen edges", target: nil, action: nil)
         voice = NSSegmentedControl(labels: Voice.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
         level = NSSegmentedControl(labels: app.pixelSizes.map(\.0), trackingMode: .selectOne, target: nil, action: nil)
         super.init()
         size.addItems(withTitles: app.sizes.map(\.0))
         for (c, a) in [(size, #selector(sizeChanged)), (character, #selector(characterChanged)), (voice, #selector(voiceChanged))] { c.target = self; c.action = a }
-        for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged))] { c.target = self; c.action = a }
+        for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged)), (dock, #selector(dockChanged))] { c.target = self; c.action = a }
         level.target = self; level.action = #selector(pixelChanged); opacity.target = self; opacity.action = #selector(opacityChanged)
         let add = NSButton(title: "Add…", target: app, action: #selector(App.addCharacter)), folder = NSButton(title: "Open Folder…", target: app, action: #selector(App.openCharacters))
         let label = { (t: String) in NSTextField(labelWithString: t) }
         let grid = NSGridView(views: [
-            [label("Size"), size], [label("Character"), character], [NSView(), NSStackView(views: [add, folder])], [label("Voice"), voice], [label("Opacity"), opacity], [NSView(), top], [NSView(), fade], [label("Pixel size"), level]])
+            [label("Size"), size], [label("Character"), character], [NSView(), NSStackView(views: [add, folder])], [label("Voice"), voice], [label("Opacity"), opacity], [NSView(), top], [NSView(), fade], [NSView(), dock], [label("Pixel size"), level]])
         grid.rowSpacing = 10; grid.columnSpacing = 12; grid.column(at: 0).xPlacement = .trailing
         let row = NSStackView(views: [preview, grid]); row.spacing = 24; row.alignment = .centerY
         let box = NSView(); row.translatesAutoresizingMaskIntoConstraints = false; box.addSubview(row)
@@ -726,6 +762,7 @@ final class SettingsPanel: NSObject {
         preview.sprite = app.view.sprite
         voice.selectedSegment = app.voiceIndex
         top.state = app.window.level == .floating ? .on : .off; fade.state = app.fadeOnHover ? .on : .off
+        dock.state = app.dockEdges ? .on : .off
         level.selectedSegment = app.pixelSize; opacity.doubleValue = Double(app.opacity)
     }
     @objc func sizeChanged() { app.setSize(size.indexOfSelectedItem) }
@@ -733,6 +770,7 @@ final class SettingsPanel: NSObject {
     @objc func voiceChanged() { app.setVoice(Voice.allCases[voice.selectedSegment]) }
     @objc func topChanged() { app.setTop(top.state == .on) }
     @objc func fadeChanged() { app.setFade(fade.state == .on) }
+    @objc func dockChanged() { app.setDockEdges(dock.state == .on) }
     @objc func opacityChanged() { app.setOpacity(CGFloat(opacity.doubleValue)) }
     @objc func pixelChanged() { app.setPixel(level.selectedSegment) }
 }
@@ -778,6 +816,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     let sizes: [(String, CGFloat)] = [("Small", 160), ("Medium", 240), ("Large", 340)]
     var height: CGFloat { CGFloat(UserDefaults.standard.object(forKey: "height") as? Double ?? 240) }
     var fadeOnHover = UserDefaults.standard.bool(forKey: "fadeOnHover")
+    var dockEdges = UserDefaults.standard.object(forKey: "dockEdges") as? Bool ?? true
     var opacity = CGFloat(UserDefaults.standard.object(forKey: "opacity") as? Double ?? 1)
     let pixelSizes: [(String, Int?)] = [("Off", nil), ("Fine", 2), ("Medium", 3), ("Coarse", 4)]   // block size in source pixels
     var pixelSize = App.savedPixelSize()
@@ -815,7 +854,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         view = PetView(sprite: characters().first { $0.name == currentCharacter }
             .flatMap { Sprite($0.dir, block: block) } ?? Sprite(Bundle.main.resourceURL!, block: block)!)
         view.onClick = { [weak self] in self?.toggleInput() }
-        view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }
+        view.onMoved = { [weak self] in self?.dockToEdge(); self?.window.saveFrame(usingName: "pet") }
+        view.onDragStart = { [weak self] in self?.layoutOverlays() }
+        view.dock = UserDefaults.standard.string(forKey: "dock").flatMap(Pose.init)
         view.onTouch = { [weak self] in guard let self else { return }; self.poke(self.startle) }
         view.onRightClick = { [weak self] in self?.toggleUsagePanel() }
         window.contentView = view
@@ -854,11 +895,24 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         if keepBottom { origin = NSPoint(x: window.frame.midX - w / 2, y: window.frame.minY) }
         else { let v = NSScreen.main!.visibleFrame; origin = NSPoint(x: v.maxX - w - 40, y: v.minY + 10) }
         window.setFrame(NSRect(origin: origin, size: size), display: true)
-        window.saveFrame(usingName: "pet")
         view.spriteHeight = h
-        input.frame = NSRect(x: 8, y: h + 4, width: w - 16, height: 24)
-        layoutOverlays()
+        dockToEdge()
+        window.saveFrame(usingName: "pet")
         UserDefaults.standard.set(Double(h), forKey: "height")
+    }
+
+    /// Docks her to the screen edge she's pushed past by a quarter of her size (if dockEdges is on), showing her peeking from
+    /// there with the cut edge on the screen's edge; anywhere else she stands.
+    func dockToEdge() {
+        let v = (window.screen ?? NSScreen.main!).visibleFrame, r = window.convertToScreen(view.convert(view.shown.rect, to: nil))
+        let past: [(Pose, CGFloat)] = [(.peek_bottom, (v.minY - r.minY) / r.height), (.peek_left, (v.minX - r.minX) / r.width), (.peek_right, (r.maxX - v.maxX) / r.width)]
+        let dock = past.filter { dockEdges && view.sprite.has($0.0) && $0.1 > 0.25 }.max { $0.1 < $1.1 }?.0
+        view.dock = dock; UserDefaults.standard.set(dock?.rawValue, forKey: "dock")
+        var f = window.frame
+        if dock != nil { f.origin.y = max(v.minY, min(f.minY, v.maxY - view.top)) }
+        if dock == .peek_left { f.origin.x = v.minX } else if dock == .peek_right { f.origin.x = v.maxX - f.width }
+        window.setFrameOrigin(f.origin)
+        layoutOverlays()
     }
 
     /// Visibility and frames of everything above the head, from state:
@@ -868,7 +922,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         card.isHidden = pending.isEmpty
         if !card.isHidden { bubble.isHidden = true }
         let w = window.frame.width
-        var y = view.spriteHeight + (input.isHidden ? 6 : 32)
+        input.frame = NSRect(x: 8, y: view.top + 4, width: w - 16, height: 24)
+        var y = view.top + (input.isHidden ? 6 : 32)
         let fit = statusPill.sizeThatFits(NSSize(width: w - 24, height: .greatestFiniteMagnitude))
         statusPill.frame = NSRect(x: 4, y: y, width: w - 8, height: min(fit.height + 6, 30))
         if !statusPill.isHidden { y += statusPill.frame.height + 4 }
@@ -890,7 +945,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         if want.body == view.pose.body { view.pose = want }
         else if t - bodySince >= bodyHold { view.pose = want; bodySince = t }   // the sequence runs on meanwhile: frames can be skipped
         // see-through on hover: ease towards 30% in about half a second, and back
-        let hover = fadeOnHover && view.spriteRect.contains(view.convert(window.mouseLocationOutsideOfEventStream, from: nil))
+        let hover = fadeOnHover && view.shown.rect.contains(view.convert(window.mouseLocationOutsideOfEventStream, from: nil))
         let target: CGFloat = hover ? min(0.3, opacity) : opacity
         view.fade = abs(target - view.fade) < 0.01 ? target : view.fade + (target - view.fade) * 0.2
         if !input.isHidden && t - inputSince > 30 && input.stringValue.isEmpty { closeInput() }
@@ -1217,6 +1272,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     @objc func stopAgent() { agent.interrupt() }
     func setTop(_ on: Bool) { window.level = on ? .floating : .normal; UserDefaults.standard.set(on, forKey: "onTop") }
     func setFade(_ on: Bool) { fadeOnHover = on; UserDefaults.standard.set(on, forKey: "fadeOnHover") }
+    func setDockEdges(_ on: Bool) { dockEdges = on; UserDefaults.standard.set(on, forKey: "dockEdges"); dockToEdge(); window.saveFrame(usingName: "pet") }
     func setOpacity(_ a: CGFloat) { opacity = a; UserDefaults.standard.set(Double(a), forKey: "opacity") }
     func setSize(_ i: Int) { resize(sizes[i].1); settings?.reload() }
     func setPixel(_ i: Int) {
