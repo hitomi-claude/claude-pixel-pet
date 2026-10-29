@@ -128,16 +128,15 @@ struct Tune: RandomNumberGenerator {
 /// Sprite frames, one PNG each in a character's folder. closed/half/open are the mouth while talking, then face poses,
 /// then full-body poses (sleep, work, stretch), which may be bigger than closed.png, then the upper body peeking over the
 /// edge of the screen it's docked to, cut straight along that edge, and each with the eyes closed. A clip's frames are
-/// poses too, named "<clip>/<frame>".
-struct Pose: Hashable, RawRepresentable {
-    let rawValue: String
-    init(rawValue: String) { self.rawValue = rawValue }
-    static let closed = Pose(rawValue: "closed"), half = Pose(rawValue: "half"), open = Pose(rawValue: "open"),
-               blink_half = Pose(rawValue: "blink_half"), blink_closed = Pose(rawValue: "blink_closed"), read = Pose(rawValue: "read"),
-               yawn = Pose(rawValue: "yawn"), surprised = Pose(rawValue: "surprised"), sleep = Pose(rawValue: "sleep"), work = Pose(rawValue: "work"),
-               stretch = Pose(rawValue: "stretch"), peek_bottom = Pose(rawValue: "peek_bottom"), peek_left = Pose(rawValue: "peek_left"),
-               peek_right = Pose(rawValue: "peek_right"), peek_bottom_closed = Pose(rawValue: "peek_bottom_closed"),
-               peek_left_closed = Pose(rawValue: "peek_left_closed"), peek_right_closed = Pose(rawValue: "peek_right_closed")
+/// poses too.
+struct Pose: Hashable {
+    let rawValue: String, clip: Clip?, index: Int
+    init(_ name: String) { rawValue = name; clip = nil; index = 0 }
+    init(_ c: Clip, _ i: Int) { rawValue = "\(c.rawValue)/\(i)"; clip = c; index = i }
+    static let closed = Pose("closed"), half = Pose("half"), open = Pose("open"), blink_half = Pose("blink_half"), blink_closed = Pose("blink_closed"),
+               read = Pose("read"), yawn = Pose("yawn"), surprised = Pose("surprised"), sleep = Pose("sleep"), work = Pose("work"), stretch = Pose("stretch"),
+               peek_bottom = Pose("peek_bottom"), peek_left = Pose("peek_left"), peek_right = Pose("peek_right"),
+               peek_bottom_closed = Pose("peek_bottom_closed"), peek_left_closed = Pose("peek_left_closed"), peek_right_closed = Pose("peek_right_closed")
     static let allCases = [closed, half, open, blink_half, blink_closed, read, yawn, surprised, sleep, work, stretch, peek_bottom, peek_left,
                            peek_right, peek_bottom_closed, peek_left_closed, peek_right_closed]   // the still frames
     static let peeks: [Pose: Pose] = [.peek_bottom: .peek_bottom_closed, .peek_left: .peek_left_closed, .peek_right: .peek_right_closed]   // and with the eyes closed
@@ -150,14 +149,9 @@ struct Pose: Hashable, RawRepresentable {
     }
     /// The frame shown for this pose while docked: the eyes shut through a blink, and asleep on the bottom edge.
     func peek(_ dock: Pose) -> Pose {
-        self == .blink_half || self == .blink_closed || (self == .sleep || rawValue.hasPrefix("sleep_loop/")) && dock == .peek_bottom ? Pose.peeks[dock]! : dock
+        self == .blink_half || self == .blink_closed || (self == .sleep || clip == .sleep_loop) && dock == .peek_bottom ? Pose.peeks[dock]! : dock
     }
     var body: Pose { standIn == nil ? .closed : self }   // the full-body pose; face frames and clip frames all stand
-    var clip: (Clip, Int)? {   // a clip frame's clip and index
-        let p = rawValue.split(separator: "/")
-        guard p.count == 2, let c = Clip(rawValue: String(p[0])), let i = Int(p[1]) else { return nil }
-        return (c, i)
-    }
 }
 
 /// Motion between and around the poses, from a video model: <character>/clips/<clip>.mov, HEVC with alpha made by
@@ -165,15 +159,18 @@ struct Pose: Hashable, RawRepresentable {
 /// pose and plays in real time; the rest at twice the speed.
 enum Clip: String, CaseIterable {
     case closed_to_work, work_loop, work_to_closed, closed_to_read, read_to_closed, closed_to_sleep, sleep_loop, sleep_to_closed, surprise, yawn, idle_loop
-    var seconds: Double { rawValue.hasSuffix("_loop") ? 4.4 : 2.2 }
+    /// The poses she rests in: the loop she plays there, and the clips into it from standing and out of it back to standing.
+    static let rests: [Pose: (loop: Clip, enter: Clip?, exit: Clip?)] = [
+        .closed: (.idle_loop, nil, nil), .work: (.work_loop, .closed_to_work, .work_to_closed), .sleep: (.sleep_loop, .closed_to_sleep, .sleep_to_closed)]
+    var seconds: Double { Clip.rests.values.contains { $0.loop == self } ? 4.4 : 2.2 }
     static let fps = 10   // as tools/pack_clips.swift writes them
-    static func decode(_ url: URL, _ n: Int) async -> [NSImage] {   // every frame in order, about a quarter of a second for 40
+    static func decode(_ url: URL, _ frames: [Int]) async -> [NSImage] {   // those frames in order; all 40 of a loop take about a quarter of a second
         let g = AVAssetImageGenerator(asset: AVURLAsset(url: url)); g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
-        var images = [NSImage?](repeating: nil, count: n)
-        for await r in g.images(for: (0..<n).map { CMTime(value: CMTimeValue($0), timescale: CMTimeScale(fps)) }) {
+        var images: [Int: NSImage] = [:]
+        for await r in g.images(for: frames.map { CMTime(value: CMTimeValue($0), timescale: CMTimeScale(fps)) }) {
             if let cg = try? r.image { images[Int(r.requestedTime.value)] = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)) }
         }
-        return images.compactMap { $0 }
+        return frames.compactMap { images[$0] }
     }
 }
 
@@ -193,12 +190,12 @@ func characters() -> [(name: String, dir: URL)] {
 
 final class Sprite {
     let dir: URL
-    private let frames: [Pose: NSImage]
-    private var clipFiles: [Clip: URL] = [:]
-    private var decoded: [Clip: [NSImage]] = [:], decoding: Set<Clip> = [], recent: [Clip] = []   // a clip is decoded to play it; the last two stay
-    private var held: [Pose: NSImage] = [:]   // the clip frames she rests on, kept once decoded
+    private let frames: [Pose: NSImage], stillSize: [Pose: CGSize]
+    private var clipFiles: [Clip: URL] = [:], clipSize: [Clip: CGSize] = [:]
+    private var decoded: [Clip: [NSImage]] = [:], decoding: Set<Clip> = [], recent: [Clip] = []   // a clip is decoded to play it; the last three stay
+    private var held: [Pose: NSImage] = [:]   // the clip frames she rests on, decoded on their own and kept
     private(set) var clips: [Clip: [Pose]] = [:]   // the frames of each clip the character has, known a moment after loading
-    private(set) var size: [Pose: CGSize]   // each frame's size relative to closed.png; full-body poses can be bigger (raised arms)
+    var animated: Bool { clips[.idle_loop] != nil }   // moves in clips rather than between the stills
     let aspect: CGFloat
     private let masks: [Pose: (w: Int, h: Int, alpha: [UInt8])]   // of the neutral and the open peek frames, for click-through
     init?(_ dir: URL) {
@@ -208,7 +205,7 @@ final class Sprite {
         let own = Dictionary(uniqueKeysWithValues: Pose.allCases.compactMap { p in NSImage(contentsOf: p.png(in: dir)).map { (p, $0) } })
         frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, own[$0] ?? $0.standIn.flatMap { own[$0] } ?? own[.closed]!) })
         aspect = CGFloat(cg.width) / CGFloat(cg.height)
-        size = frames.mapValues { im in im.representations.first.map { CGSize(width: CGFloat($0.pixelsWide) / CGFloat(cg.width), height: CGFloat($0.pixelsHigh) / CGFloat(cg.height)) } ?? CGSize(width: 1, height: 1) }
+        stillSize = frames.mapValues { im in im.representations.first.map { CGSize(width: CGFloat($0.pixelsWide) / CGFloat(cg.width), height: CGFloat($0.pixelsHigh) / CGFloat(cg.height)) } ?? CGSize(width: 1, height: 1) }
         masks = Dictionary(uniqueKeysWithValues: ([.closed] + Pose.peeks.keys).compactMap { p in
             (p == .closed ? cg : own[p]?.cgImage(forProposedRect: nil, context: nil, hints: nil)).map { (p, Sprite.alpha($0)) }
         })
@@ -222,47 +219,41 @@ final class Sprite {
                 found.append((c, f, Int((range.duration.seconds * Double(Clip.fps)).rounded()), CGSize(width: size.width / px.width, height: size.height / px.height)))
             }
             await MainActor.run { [found] in
-                for (c, f, n, k) in found where n > 0 {
-                    clipFiles[c] = f; clips[c] = (0..<n).map { Pose(rawValue: "\(c.rawValue)/\($0)") }
-                    for p in clips[c]! { size[p] = k }
+                for (c, f, n, k) in found where n > 0 { clipFiles[c] = f; clipSize[c] = k; clips[c] = (0..<n).map { Pose(c, $0) } }
+                for p in [Pose.closed, .work, .sleep, .read].map(hold) {
+                    guard let c = p.clip, let f = clipFiles[c] else { continue }
+                    Task { let im = await Clip.decode(f, [p.index]).first; await MainActor.run { held[p] = im } }
                 }
-                for p in holds { if let (c, _) = p.clip { prepare(c) } }
             }
         }
     }
+    func size(_ p: Pose) -> CGSize { p.clip.flatMap { clipSize[$0] } ?? stillSize[p] ?? CGSize(width: 1, height: 1) }   // relative to closed.png; full-body poses can be bigger
     /// The frame she rests on in a pose: with clips a video frame, so she never jumps back to a differently drawn still.
     func hold(_ p: Pose) -> Pose {
-        let f: Pose? = switch p {
-        case .closed: clips[.idle_loop]?.first; case .work: clips[.work_loop]?.first
-        case .sleep: clips[.sleep_loop]?.first; case .read: clips[.closed_to_read]?.last
-        default: nil
-        }
-        return f ?? p
+        (p == .read ? clips[.closed_to_read]?.last : Clip.rests[p].flatMap { clips[$0.loop]?.first }) ?? p
     }
-    private var holds: [Pose] { [Pose.closed, .work, .sleep, .read].map(hold) }
     /// Whether a frame can be drawn now. A clip frame needs its clip decoded; asking starts that.
     func ready(_ p: Pose) -> Bool {
-        guard let (c, _) = p.clip, held[p] == nil else { return true }
+        guard let c = p.clip, held[p] == nil else { return true }
         if decoded[c] == nil { prepare(c); return false }
-        if recent.last != c { recent.removeAll { $0 == c }; recent.append(c) }
+        if recent.last != c { touch(c) }
         return true
+    }
+    private func touch(_ c: Clip) {   // most recently used last; only the last three stay decoded
+        recent.removeAll { $0 == c }; recent.append(c)
+        for old in recent.dropLast(3) { decoded[old] = nil }
+        recent = Array(recent.suffix(3))
     }
     private func prepare(_ c: Clip) {
         guard let f = clipFiles[c], let n = clips[c]?.count, decoding.insert(c).inserted else { return }
         Task {
-            let images = await Clip.decode(f, n)
-            await MainActor.run {
-                decoding.remove(c); decoded[c] = images
-                for (p, im) in zip(clips[c]!, images) where holds.contains(p) { held[p] = im }
-                recent.removeAll { $0 == c }; recent.append(c)
-                for old in recent.dropLast(2) { decoded[old] = nil }
-                recent = Array(recent.suffix(2))
-            }
+            let images = await Clip.decode(f, Array(0..<n))
+            await MainActor.run { decoding.remove(c); decoded[c] = images; touch(c) }
         }
     }
     func image(_ p: Pose) -> NSImage {
         if let f = frames[p] ?? held[p] { return f }
-        if let (c, i) = p.clip, let d = decoded[c], i < d.count { return d[i] }
+        if let c = p.clip, let d = decoded[c], p.index < d.count { return d[p.index] }
         return frames[.closed]!
     }
     static func alpha(_ cg: CGImage) -> (w: Int, h: Int, alpha: [UInt8]) {   // drawn into an alpha-only buffer: one pass, no per-pixel objects
@@ -313,7 +304,7 @@ final class PetView: NSView {
     /// The frame drawn and where: the same scale and bottom centre as closed.png, or a peek frame against the bottom
     /// and the edge it peeks from.
     var shown: (pose: Pose, rect: NSRect) {
-        let r = spriteRect, p = dock.map(pose.peek) ?? pose, k = sprite.size[p] ?? CGSize(width: 1, height: 1), w = r.width * k.width
+        let r = spriteRect, p = dock.map(pose.peek) ?? pose, k = sprite.size(p), w = r.width * k.width
         let x = dock == .peek_left ? 0 : dock == .peek_right ? bounds.width - w : r.midX - w / 2
         return (p, NSRect(x: x, y: dock == nil ? r.minY : 0, width: w, height: r.height * k.height))
     }
@@ -861,7 +852,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.dockToEdge() }
         view.onDragStart = { [weak self] in self?.layoutOverlays() }
-        view.dock = UserDefaults.standard.string(forKey: "dock").map(Pose.init).flatMap { Pose.peeks[$0] == nil ? nil : $0 }
+        view.dock = UserDefaults.standard.string(forKey: "dock").flatMap { s in Pose.peeks.keys.first { $0.rawValue == s } }
         view.onTouch = { [weak self] in guard let self else { return }; self.poke(self.startle) }
         view.onRightClick = { [weak self] in self?.toggleUsagePanel() }
         window.contentView = view
@@ -938,7 +929,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     func tick() {   // 30fps: slow breathing bob (without clips), waiting dots, animation
         t += 1 / 30
-        view.bob = view.sprite.clips.isEmpty ? (CGFloat(sin(t * 2 * .pi / 3.2) + 1) * view.spriteHeight * 0.006).rounded() : 0   // the clips breathe on their own
+        view.bob = !view.sprite.animated ? (CGFloat(sin(t * 2 * .pi / 3.2) + 1) * view.spriteHeight * 0.006).rounded() : 0   // the clips breathe on their own
         if waiting && Int(t * 30) % 12 == 0 { bubble.string = String(repeating: "·", count: Int(t * 2.5) % 3 + 1) }
         while !anim.isEmpty && t >= animStepEnd {   // catch up on frames shorter than a tick (fast typing)
             anim.removeFirst()
@@ -946,7 +937,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         }
         typeStep()
         let goal: Pose = asleep ? .sleep : statusPill.isHidden ? .closed : .work   // writing for as long as the pill is up
-        if goal != rest && anim.isEmpty { play(clip(rest == .closed ? nil : Clip(rawValue: "\(rest.rawValue)_to_closed")) + clip(goal == .closed ? nil : Clip(rawValue: "closed_to_\(goal.rawValue)")), .idle); rest = goal }
+        if goal != rest && anim.isEmpty { play(clip(Clip.rests[rest]?.exit) + clip(Clip.rests[goal]?.enter), .idle); rest = goal }   // through standing
         var want = anim.first?.0 ?? view.sprite.hold(rest)
         if !view.sprite.ready(want) {   // its clip is still decoding (a tenth of a second): she stays as she is and the sequence waits
             want = view.pose; if !anim.isEmpty { animStepEnd = t + anim[0].1 }
@@ -1004,20 +995,19 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
     let blink: [(Pose, Double)] = [(.blink_half, 0.05), (.blink_closed, 0.08), (.blink_half, 0.05)]
     var idleActions: [(chance: Double, seq: [(Pose, Double)])] {
-        let read = [(Pose.read, 2.2)] + blink + [(.read, 2.4)]
-        return view.sprite.clips[.idle_loop] == nil ? [
-            (0.06, [(.blink_half, 0.08), (.yawn, 1.4), (.blink_half, 0.1)]),                // rare yawn
-            (0.14, read + [(.blink_half, 0.06)]),                                           // read the book a moment
-            (0.10, blink + [(.closed, 0.15)] + blink),                                      // double blink
-            (0.70, blink),
-        ] : [   // with clips nothing goes back to the stills: the idle loop blinks, and reading holds the clip's last frame
+        view.sprite.animated ? [   // with clips nothing goes back to the stills: the idle loop blinks, and reading holds the clip's last frame
             (0.06, clip(.yawn)),
             (0.14, clip(.closed_to_read) + [(view.sprite.hold(.read), 4.6)] + clip(.read_to_closed)),
             (0.80, clip(.idle_loop)),
+        ] : [
+            (0.06, [(.blink_half, 0.08), (.yawn, 1.4), (.blink_half, 0.1)]),                // rare yawn
+            (0.14, [(.read, 2.2)] + blink + [(.read, 2.4), (.blink_half, 0.06)]),          // read the book a moment
+            (0.10, blink + [(.closed, 0.15)] + blink),                                      // double blink
+            (0.70, blink),
         ]
     }
     func idleAnimation() {   // pick one idle action by its chance; writing or asleep, that pose's loop
-        if rest != .closed { play(clip(rest == .work ? .work_loop : .sleep_loop), .idle); return }
+        if rest != .closed { play(clip(Clip.rests[rest]?.loop), .idle); return }
         var r = Double.random(in: 0..<1)
         for a in idleActions { r -= a.chance; if r < 0 { play(a.seq, .idle); return } }
     }
@@ -1297,7 +1287,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     func setDockEdges(_ on: Bool) { dockEdges = on; UserDefaults.standard.set(on, forKey: "dockEdges"); dockToEdge() }
     func setOpacity(_ a: CGFloat) { opacity = a; UserDefaults.standard.set(Double(a), forKey: "opacity") }
     func setSize(_ i: Int) { resize(sizes[i].1); settings?.reload() }
-    /// Builds a sprite off the main thread (decoding every frame), then hands it back on the main thread,
+    /// Builds a sprite off the main thread (loading its PNGs), then hands it back on the main thread,
     /// unless a newer build was asked for meanwhile.
     func loadSprite(_ dir: URL, then: @escaping (Sprite?) -> Void) {
         spriteGen += 1; let gen = spriteGen
