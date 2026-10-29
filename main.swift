@@ -149,7 +149,8 @@ struct Pose: Hashable {
     }
     /// The frame shown for this pose while docked: the eyes shut through a blink, and asleep on the bottom edge.
     func peek(_ dock: Pose) -> Pose {
-        self == .blink_half || self == .blink_closed || (self == .sleep || clip == .sleep_loop) && dock == .peek_bottom ? Pose.peeks[dock]! : dock
+        if clip == Clip.peeks[dock] { return self }   // her own peek loop is already cut for the edge
+        return self == .blink_half || self == .blink_closed || (self == .sleep || clip == .sleep_loop) && dock == .peek_bottom ? Pose.peeks[dock]! : dock
     }
     var body: Pose { standIn == nil ? .closed : self }   // the full-body pose; face frames and clip frames all stand
 }
@@ -158,11 +159,14 @@ struct Pose: Hashable {
 /// tools/pack_clips.swift, each frame at closed.png's scale with the feet at the bottom centre. A loop starts and ends on its
 /// pose and plays in real time; the rest at twice the speed.
 enum Clip: String, CaseIterable {
-    case closed_to_work, work_loop, work_to_closed, closed_to_read, read_to_closed, closed_to_sleep, sleep_loop, sleep_to_closed, surprise, yawn, idle_loop
+    case closed_to_work, work_loop, work_to_closed, closed_to_read, read_to_closed, closed_to_sleep, sleep_loop, sleep_to_closed, surprise, yawn, idle_loop,
+         peek_bottom_loop, peek_left_loop, peek_right_loop, talk
     /// The poses she rests in: the loop she plays there, and the clips into it from standing and out of it back to standing.
     static let rests: [Pose: (loop: Clip, enter: Clip?, exit: Clip?)] = [
         .closed: (.idle_loop, nil, nil), .work: (.work_loop, .closed_to_work, .work_to_closed), .sleep: (.sleep_loop, .closed_to_sleep, .sleep_to_closed)]
-    var seconds: Double { Clip.rests.values.contains { $0.loop == self } ? 4.4 : 2.2 }
+    static let peeks: [Pose: Clip] = [.peek_bottom: .peek_bottom_loop, .peek_left: .peek_left_loop, .peek_right: .peek_right_loop]   // cut like their peek frame
+    var loops: Bool { Clip.rests.values.contains { $0.loop == self } || Clip.peeks.values.contains(self) || self == .talk }
+    var seconds: Double { loops ? 4.4 : 2.2 }
     static let fps = 10   // as tools/pack_clips.swift writes them
     static func decode(_ url: URL, _ frames: [Int]) async -> [NSImage] {   // those frames in order; all 40 of a loop take about a quarter of a second
         let g = AVAssetImageGenerator(asset: AVURLAsset(url: url)); g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
@@ -938,8 +942,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         typeStep()
         let goal: Pose = asleep ? .sleep : statusPill.isHidden ? .closed : .work   // writing for as long as the pill is up
         if goal != rest && anim.isEmpty { play(clip(Clip.rests[rest]?.exit) + clip(Clip.rests[goal]?.enter), .idle); rest = goal }   // through standing
+        if animPriority == .idle, let c = anim.first?.0.clip, Clip.peeks.values.contains(c), c != loop { anim = [] }   // moved off that edge
+        if anim.isEmpty && (loop != nil || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
         var want = anim.first?.0 ?? view.sprite.hold(rest)
-        if !view.sprite.ready(want) {   // its clip is still decoding (a tenth of a second): she stays as she is and the sequence waits
+        if !view.sprite.ready(view.dock.map(want.peek) ?? want) {   // the frame drawn   // its clip is still decoding (a tenth of a second): she stays as she is and the sequence waits
             want = view.pose; if !anim.isEmpty { animStepEnd = t + anim[0].1 }
         }
         if want.body == view.pose.body { view.pose = want }
@@ -949,7 +955,6 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let target: CGFloat = hover ? min(0.3, opacity) : opacity
         view.fade = abs(target - view.fade) < 0.01 ? target : view.fade + (target - view.fade) * 0.2
         if !input.isHidden && t - inputSince > 30 && input.stringValue.isEmpty { closeInput() }
-        if anim.isEmpty && (rest != .closed || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
     }
     // dozes off after 5 minutes without a click, a word or a busy Claude Code session; poke() wakes her with a stretch, or with a start when she's clicked
     // a full-body pose stays up at least bodyHold seconds, so she doesn't flicker between them
@@ -962,10 +967,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         if asleep { play(wakeup ?? wake, .expression); rest = .closed }
         lastActive = t
     }
-    /// A clip's frames over its seconds, or `alt` when the character has no such clip.
-    func clip(_ c: Clip?, else alt: [(Pose, Double)] = []) -> [(Pose, Double)] {
+    /// A clip's frames over its seconds, repeated to fill `seconds` if given, or `alt` when the character has no such clip.
+    func clip(_ c: Clip?, for seconds: Double? = nil, else alt: [(Pose, Double)] = []) -> [(Pose, Double)] {
         guard let c, let f = view.sprite.clips[c] else { return alt }
-        return f.map { ($0, c.seconds / Double(f.count)) }
+        let step = c.seconds / Double(f.count)
+        return (0..<(seconds.map { Int(($0 / step).rounded(.up)) } ?? f.count)).map { (f[$0 % f.count], step) }
     }
 
     // animation: one sequence of (pose, seconds) at a time, stepped by tick(); then back to the neutral face.
@@ -1006,8 +1012,12 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             (0.70, blink),
         ]
     }
-    func idleAnimation() {   // pick one idle action by its chance; writing or asleep, that pose's loop
-        if rest != .closed { play(clip(Clip.rests[rest]?.loop), .idle); return }
+    var loop: Clip? {   // the loop she plays where she is: peeking from an edge (unless asleep there), writing, or asleep
+        if let d = view.dock, rest != .sleep, let c = Clip.peeks[d], view.sprite.clips[c] != nil { return c }
+        return rest == .closed ? nil : Clip.rests[rest]?.loop
+    }
+    func idleAnimation() {   // pick one idle action by its chance; peeking, writing or asleep, that loop
+        if let c = loop { play(clip(c), .idle); return }
         var r = Double.random(in: 0..<1)
         for a in idleActions { r -= a.chance; if r < 0 { play(a.seq, .idle); return } }
     }
@@ -1020,8 +1030,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let woke = asleep; poke()   // the talk replaces poke's stretch: stretch once she's said it
         sayText = text; bubble.string = ""; bubble.isHidden = false
         typing = (full, 0, t, step, voiced, Tune(text))
-        play(flap + (woke ? wake : []) + then, .talk)
-        holdBubble((hold ?? max(4, Double(text.count) / 12)) + flap.reduce(0) { $0 + $1.1 })
+        let long = flap.reduce(0) { $0 + $1.1 }
+        play(clip(.talk, for: long, else: flap) + (woke ? wake : []) + then, .talk)   // with a talking clip she talks in it while it types
+        holdBubble((hold ?? max(4, Double(text.count) / 12)) + long)
     }
     /// Keep the bubble up for `hold` seconds (longer while the input is open or Claude is working).
     func holdBubble(_ hold: TimeInterval) {
