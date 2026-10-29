@@ -339,7 +339,7 @@ final class PetView: NSView {
 
 // MARK: Claude Code activity + usage, read from ~/.claude*/projects/**/*.jsonl
 
-struct Activity { var working = false; var detail = ""; var project = ""; var last = Date.distantPast; var since = Date.distantPast; var context = 0 }
+struct Activity { var working = false, interrupted = false; var detail = ""; var project = ""; var last = Date.distantPast; var since = Date.distantPast; var context = 0 }
 struct Usage: Equatable { var input = 0, output = 0, sessions = 0 }
 
 final class Monitor {
@@ -414,14 +414,13 @@ final class Monitor {
             if let cwd = j["cwd"] as? String { st.act.project = (cwd as NSString).lastPathComponent }
             if type == "user" {
                 st.lastUser = max(st.lastUser, ts)
-                let texts = (msg["content"] as? String).map { [$0] } ?? content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+                let text = (msg["content"] as? String) ?? content.last(where: { $0["type"] as? String == "text" })?["text"] as? String
                 // Esc in Claude Code leaves "[Request interrupted by user…]" as the last text: the turn is over
-                if texts.last?.hasPrefix("[Request interrupted by user") == true {
-                    st.act.working = false; st.act.detail = "interrupted"; st.act.last = ts; continue
+                st.act.interrupted = text?.hasPrefix("[Request interrupted by user") == true
+                if st.act.interrupted { st.act.working = false } else {
+                    if text != nil { if !st.act.working { st.act.since = ts }; st.act.detail = "thinking" }
+                    st.act.working = true
                 }
-                if !texts.isEmpty && !st.act.working { st.act.since = ts }
-                st.act.working = true
-                if !texts.isEmpty { st.act.detail = "thinking" }
             } else {
                 if let u = msg["usage"] as? [String: Any], let id = msg["id"] as? String {
                     let inp = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].reduce(0) { $0 + (u[$1] as? Int ?? 0) }
@@ -1129,7 +1128,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let fresh = act.map { Date().timeIntervalSince($0.last) < 600 } ?? false
         let working = fresh && (act?.working ?? false)
         otherActivity = working ? "\(act!.project): \(act!.detail)" : ""
-        if wasWorking && !working, let a = act, fresh, a.detail != "interrupted", a.last.timeIntervalSince(a.since) > 20, !agent.busy {
+        if wasWorking && !working, let a = act, fresh, !a.interrupted, a.last.timeIntervalSince(a.since) > 20, !agent.busy {
             say("Done in \(a.project). Your turn.", then: [(.stretch, 1.6)])
         }
         if working || agent.busy { poke() }
