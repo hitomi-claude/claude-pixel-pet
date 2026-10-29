@@ -10,7 +10,7 @@ guard args.count >= 3 else { print("usage: pack_clips SRC DEST [quality]"); exit
 let src = URL(fileURLWithPath: args[1]), dest = URL(fileURLWithPath: args[2]), quality = args.count > 3 ? Double(args[3])! : 0.7
 let fm = FileManager.default, fps: CMTimeScale = 10
 try fm.createDirectory(at: dest, withIntermediateDirectories: true)
-for dir in try fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil).filter(\.hasDirectoryPath).sorted(by: { $0.path < $1.path }) {
+for dir in try fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil).map({ $0.resolvingSymlinksInPath() }).filter(\.hasDirectoryPath).sorted(by: { $0.path < $1.path }) {
     let frames = try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil).filter { ["png", "webp"].contains($0.pathExtension) }
         .sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { NSImage(contentsOf: $0)?.cgImage(forProposedRect: nil, context: nil, hints: nil) }
     guard let first = frames.first else { continue }
