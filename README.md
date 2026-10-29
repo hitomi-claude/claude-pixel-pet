@@ -85,7 +85,7 @@ Sessions the pet runs itself don't need it: their permission requests already po
 | `main.swift` | the whole app (AppKit, no dependencies) |
 | `build.sh` | compiles with `swiftc` and packages the `.app` |
 | `Resources/` | smooth sprite frames: mouth closed / half / open, plus face poses (blinks, reading, yawn, surprised) and full-body poses; `clips/<clip>.mov` the motion clips, HEVC with alpha (each outfit has its own); `Characters/<name>/` holds the outfits; `AppIcon.icns` is the app icon |
-| `tools/pack_clips.swift` | packs folders of clip frames (`NN.png` or `.webp`, one size, feet at the bottom centre) into `clips/<clip>.mov`, HEVC with alpha at 10 fps; the app decodes a clip when it plays and keeps the last two (macOS only, no dependencies) |
+| `tools/pack_clips.swift` | packs folders of clip frames (`NN.png` or `.webp`, one size, feet at the bottom centre) into `clips/<clip>.mov`, HEVC with alpha at 10 fps; the app decodes a clip when it plays and keeps the last three (macOS only, no dependencies) |
 | `tools/make_icon.py` | builds `Resources/AppIcon.icns` from a sprite: head and shoulders on a cream plate, every size through `iconutil`; `--pixel 3` pixelates it (the shipped icon), `--square` also writes a square profile picture (numpy, Pillow) |
 | `tools/cutout.py` | cuts a sprite out of its white background and scales it to 600 px; `--white 246` for white clothes (numpy, scipy, Pillow) |
 | `tools/fit_frame.py` | scales and places a full-body pose so its head mark and soles line up with `closed.png`, growing the canvas for raised arms (numpy, OpenCV, Pillow) |
