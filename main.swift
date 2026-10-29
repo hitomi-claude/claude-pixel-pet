@@ -944,7 +944,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             animStepEnd += anim.first?.1 ?? 0
         }
         typeStep()
-        let want = anim.first?.0 ?? (asleep ? .sleep : .closed)
+        let want = anim.first?.0 ?? (asleep ? .sleep : statusPill.isHidden ? .closed : .work)   // writing for as long as the pill is up
         if want.body == view.pose.body { view.pose = want }
         else if t - bodySince >= bodyHold { view.pose = want; bodySince = t }   // the sequence runs on meanwhile: frames can be skipped
         // see-through on hover: ease towards 30% in about half a second, and back
@@ -997,8 +997,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         (0.10, blink + [(.closed, 0.15)] + blink),                                          // double blink
         (0.70, blink),
     ]
-    func idleAnimation() {   // pick one idle action by its chance; mostly writing while Claude Code works
-        if (agent.busy || !otherActivity.isEmpty) && Double.random(in: 0..<1) < 0.6 { play([(.work, .random(in: 3...6))], .idle); return }
+    func idleAnimation() {   // pick one idle action by its chance; none while Claude Code works and she's writing
+        guard statusPill.isHidden else { return }
         var r = Double.random(in: 0..<1)
         for a in idleActions { r -= a.chance; if r < 0 { play(a.seq, .idle); return } }
     }
