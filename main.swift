@@ -1,4 +1,4 @@
-// Claude desktop pet: the pixel character floating on the macOS desktop.
+// Claude desktop pet: the chibi character floating on the macOS desktop.
 // Click to chat or drive a Claude Code session, drag to move. Shows what Claude Code sessions are doing
 // (read from the local transcripts) and today's token usage in the menu-bar icon. Transparent pixels are click-through.
 import AppKit
@@ -15,7 +15,7 @@ let accounts: [(label: String, dir: URL)] = ((UserDefaults.standard.array(forKey
     .map { ($0.lastPathComponent, $0) }
 
 let persona = """
-You are Claude, living on the user's Mac desktop as a small pixel-art desktop pet (orange hair, white dress, holding a book). \
+You are Claude, living on the user's Mac desktop as a small chibi desktop pet (orange hair, white dress, holding a book). \
 The user clicked you to chat. Reply like a calm, dry-humoured friend: short, usually one to three sentences, plain text, \
 no markdown, no lists. Match the user's language.
 """
@@ -159,93 +159,17 @@ func characters() -> [(name: String, dir: URL)] {
     return [("Claude", res)] + folders(res.appendingPathComponent("Characters")) + folders(charactersDir)
 }
 
-/// Pixel art from a smooth frame: k x k blocks (k = 2 gives a 300 px grid on a 600 px frame), laid out from the bottom
-/// centre so every frame shares the grid. A block takes its mean colour, or its dark pixels' when they fill 30% of it
-/// (thin outlines survive), then the nearest of the 64 colours taken from closed.png, so talking doesn't flicker.
-enum Pixelate {
-    typealias RGB = SIMD3<Float>
-    struct Blocks { let w: Int, h: Int, ox: Int, oy: Int; var rgb: [RGB], solid: [Bool] }
-    static func rgbaContext(_ px: inout [UInt8], _ w: Int, _ h: Int) -> CGContext {
-        CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
-                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-    }
-    static func blocks(_ cg: CGImage, _ k: Int) -> Blocks {
-        let w = cg.width, h = cg.height
-        var px = [UInt8](repeating: 0, count: w * h * 4)
-        rgbaContext(&px, w, h).draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-        let ox = (w / 2) % k, oy = h % k, bw = (w - ox) / k, bh = (h - oy) / k   // a block edge at the centre and at the bottom
-        var b = Blocks(w: bw, h: bh, ox: ox, oy: oy, rgb: [RGB](repeating: .zero, count: bw * bh), solid: [Bool](repeating: false, count: bw * bh))
-        let lum = RGB(0.299, 0.587, 0.114), offsets = (0..<k * k).map { ($0 / k * w + $0 % k) * 4 }   // a block's pixels, from its top left
-        for by in 0..<bh { for bx in 0..<bw {
-            let top = ((oy + by * k) * w + ox + bx * k) * 4, idx = offsets.lazy.map { top + $0 }
-            var sum = RGB.zero, alpha: Float = 0
-            for i in idx { sum += RGB(Float(px[i]), Float(px[i + 1]), Float(px[i + 2])); alpha += Float(px[i + 3]) / 255 }   // premultiplied
-            guard alpha > Float(k * k) / 2 else { continue }
-            let mean = sum / alpha
-            var dark = RGB.zero, n: Float = 0
-            for i in idx where px[i + 3] > 127 {
-                let c = RGB(Float(px[i]), Float(px[i + 1]), Float(px[i + 2])) * (255 / Float(px[i + 3]))
-                if (c * lum).sum() < (mean * lum).sum() - 45 { dark += c; n += 1 }
-            }
-            b.rgb[by * bw + bx] = n >= 0.3 * Float(k * k) ? dark / n : mean
-            b.solid[by * bw + bx] = true
-        } }
-        return b
-    }
-    /// Median cut: split the box with the widest channel at its median until there are n boxes; each box's mean is a
-    /// palette colour. Returns a lookup table from 5-bit RGB to the nearest of them.
-    static func palette(_ b: Blocks, _ n: Int = 64) -> [RGB] {
-        var boxes = [zip(b.rgb, b.solid).filter(\.1).map(\.0)]
-        while boxes.count < n {
-            let spans = boxes.map { c -> (Float, Int) in
-                guard c.count > 1 else { return (0, 0) }
-                let lo = c.reduce(c[0]) { pointwiseMin($0, $1) }, hi = c.reduce(c[0]) { pointwiseMax($0, $1) }, d = hi - lo
-                return d.x >= d.y && d.x >= d.z ? (d.x, 0) : d.y >= d.z ? (d.y, 1) : (d.z, 2)
-            }
-            guard let i = spans.indices.max(by: { spans[$0].0 < spans[$1].0 }), spans[i].0 > 0 else { break }
-            let s = boxes[i].sorted { $0[spans[i].1] < $1[spans[i].1] }
-            boxes[i] = Array(s[..<(s.count / 2)]); boxes.append(Array(s[(s.count / 2)...]))
-        }
-        let pal = boxes.map { $0.reduce(RGB.zero, +) / Float($0.count) }
-        return (0..<32768).map { i in   // nearest palette colour for each 5-bit RGB cube, so a lookup per block
-            let c = RGB(Float(i >> 10), Float(i >> 5 & 31), Float(i & 31)) * 8 + 4
-            return pal.min { (($0 - c) * ($0 - c)).sum() < (($1 - c) * ($1 - c)).sum() }!
-        }
-    }
-    static func image(_ b: Blocks, _ k: Int, _ lut: [RGB], width: Int, height: Int) -> NSImage {
-        var px = [UInt8](repeating: 0, count: width * height * 4)
-        let q = { (v: Float) in min(max(Int(v), 0), 255) >> 3 }
-        for by in 0..<b.h { for bx in 0..<b.w where b.solid[by * b.w + bx] {
-            let c = b.rgb[by * b.w + bx], p = lut[q(c.x) << 10 | q(c.y) << 5 | q(c.z)]
-            for dy in 0..<k { for dx in 0..<k {
-                let i = ((b.oy + by * k + dy) * width + b.ox + bx * k + dx) * 4
-                px[i] = UInt8(p.x.rounded()); px[i + 1] = UInt8(p.y.rounded()); px[i + 2] = UInt8(p.z.rounded()); px[i + 3] = 255
-            } }
-        } }
-        let im = NSImage(size: NSSize(width: width, height: height)); im.addRepresentation(NSBitmapImageRep(cgImage: rgbaContext(&px, width, height).makeImage()!))   // a bitmap rep reports its real pixel size (a CGImage snapshot rep reports it at the screen scale)
-        return im
-    }
-}
-
 final class Sprite {
     let dir: URL
-    var pixel: Bool { block != nil }
-    private let block: Int?   // pixel-art block size in source pixels, or nil for the smooth frames
     let frames: [Pose: NSImage]
     let size: [Pose: CGSize]   // each frame's size relative to closed.png; full-body poses can be bigger (raised arms)
     let aspect: CGFloat
     private let masks: [Pose: (w: Int, h: Int, alpha: [UInt8])]   // of the neutral and the open peek frames, for click-through
-    init?(_ dir: URL, block: Int?) {
+    init?(_ dir: URL) {
         guard let base = NSImage(contentsOf: Pose.closed.png(in: dir)),
               let cg = base.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        self.dir = dir; self.block = block
-        var own = Dictionary(uniqueKeysWithValues: Pose.allCases.compactMap { p in NSImage(contentsOf: p.png(in: dir)).map { (p, $0) } })
-        if let k = block {
-            let pal = Pixelate.palette(Pixelate.blocks(cg, k))
-            own = own.compactMapValues { im in
-                im.cgImage(forProposedRect: nil, context: nil, hints: nil).map { Pixelate.image(Pixelate.blocks($0, k), k, pal, width: $0.width, height: $0.height) }
-            }
-        }
+        self.dir = dir
+        let own = Dictionary(uniqueKeysWithValues: Pose.allCases.compactMap { p in NSImage(contentsOf: p.png(in: dir)).map { (p, $0) } })
         frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, own[$0] ?? $0.standIn.flatMap { own[$0] } ?? own[.closed]!) })
         aspect = CGFloat(cg.width) / CGFloat(cg.height)
         size = frames.mapValues { im in im.representations.first.map { CGSize(width: CGFloat($0.pixelsWide) / CGFloat(cg.width), height: CGFloat($0.pixelsHigh) / CGFloat(cg.height)) } ?? CGSize(width: 1, height: 1) }
@@ -307,7 +231,7 @@ final class PetView: NSView {
     }
     var top: CGFloat { dock == nil ? spriteHeight : shown.rect.maxY }   // where the overlays start
     override func draw(_ dirtyRect: NSRect) {
-        NSGraphicsContext.current?.imageInterpolation = sprite.pixel ? .none : .high
+        NSGraphicsContext.current?.imageInterpolation = .high
         let (p, r) = shown
         sprite.frames[p]!.draw(in: r, from: .zero, operation: .sourceOver, fraction: fade)
     }
@@ -710,26 +634,26 @@ func planLimits(_ dir: URL, done: @escaping (Result<[Limit], LimitError>) -> Voi
 
 // MARK: app
 
-/// A small copy of the pet for the settings window, drawn the way the pet is (no smoothing for pixel art).
+/// A small copy of the pet for the settings window, drawn the way the pet is.
 final class SpritePreview: NSView {
     var sprite: Sprite? { didSet { needsDisplay = true } }
     override var intrinsicContentSize: NSSize { NSSize(width: 150, height: 240) }
     override func draw(_ dirtyRect: NSRect) {
         guard let s = sprite else { return }
-        NSGraphicsContext.current?.imageInterpolation = s.pixel ? .none : .high
+        NSGraphicsContext.current?.imageInterpolation = .high
         s.frames[.closed]!.draw(in: NSRect(x: (bounds.width - bounds.height * s.aspect) / 2, y: 0, width: bounds.height * s.aspect, height: bounds.height),
                                 from: .zero, operation: .sourceOver, fraction: 1)
     }
 }
 
 /// The settings window. Every control applies at once; reload() reads them back from the app's state each time it opens
-/// and whenever the sprite changes, so the preview and the controls follow a character or pixel change.
+/// and whenever the sprite changes, so the preview and the controls follow a character change.
 final class SettingsPanel: NSObject {
     unowned let app: App
     let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let size = NSPopUpButton(), character = NSPopUpButton(), preview = SpritePreview()
     let top: NSButton, fade: NSButton, dock: NSButton
-    let voice: NSSegmentedControl, level: NSSegmentedControl, opacity = NSSlider(value: 1, minValue: 0.3, maxValue: 1, target: nil, action: nil)
+    let voice: NSSegmentedControl, opacity = NSSlider(value: 1, minValue: 0.3, maxValue: 1, target: nil, action: nil)
 
     init(_ app: App) {
         self.app = app
@@ -737,16 +661,15 @@ final class SettingsPanel: NSObject {
         fade = NSButton(checkboxWithTitle: "See-through on hover", target: nil, action: nil)
         dock = NSButton(checkboxWithTitle: "Peek from screen edges", target: nil, action: nil)
         voice = NSSegmentedControl(labels: Voice.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
-        level = NSSegmentedControl(labels: app.pixelSizes.map(\.0), trackingMode: .selectOne, target: nil, action: nil)
         super.init()
         size.addItems(withTitles: app.sizes.map(\.0))
         for (c, a) in [(size, #selector(sizeChanged)), (character, #selector(characterChanged)), (voice, #selector(voiceChanged))] { c.target = self; c.action = a }
         for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged)), (dock, #selector(dockChanged))] { c.target = self; c.action = a }
-        level.target = self; level.action = #selector(pixelChanged); opacity.target = self; opacity.action = #selector(opacityChanged)
+        opacity.target = self; opacity.action = #selector(opacityChanged)
         let add = NSButton(title: "Add…", target: app, action: #selector(App.addCharacter)), folder = NSButton(title: "Open Folder…", target: app, action: #selector(App.openCharacters))
         let label = { (t: String) in NSTextField(labelWithString: t) }
         let grid = NSGridView(views: [
-            [label("Size"), size], [label("Character"), character], [NSView(), NSStackView(views: [add, folder])], [label("Voice"), voice], [label("Opacity"), opacity], [NSView(), top], [NSView(), fade], [NSView(), dock], [label("Pixel size"), level]])
+            [label("Size"), size], [label("Character"), character], [NSView(), NSStackView(views: [add, folder])], [label("Voice"), voice], [label("Opacity"), opacity], [NSView(), top], [NSView(), fade], [NSView(), dock]])
         grid.rowSpacing = 10; grid.columnSpacing = 12; grid.column(at: 0).xPlacement = .trailing
         let row = NSStackView(views: [preview, grid]); row.spacing = 24; row.alignment = .centerY
         let box = NSView(); row.translatesAutoresizingMaskIntoConstraints = false; box.addSubview(row)
@@ -767,7 +690,7 @@ final class SettingsPanel: NSObject {
         voice.selectedSegment = app.voiceIndex
         top.state = app.window.level == .floating ? .on : .off; fade.state = app.fadeOnHover ? .on : .off
         dock.state = app.dockEdges ? .on : .off
-        level.selectedSegment = app.pixelSize; opacity.doubleValue = Double(app.opacity)
+        opacity.doubleValue = Double(app.opacity)
     }
     @objc func sizeChanged() { app.setSize(size.indexOfSelectedItem) }
     @objc func characterChanged() { if let dir = character.selectedItem?.representedObject as? URL { app.setCharacter(character.titleOfSelectedItem!, dir) } }
@@ -776,7 +699,6 @@ final class SettingsPanel: NSObject {
     @objc func fadeChanged() { app.setFade(fade.state == .on) }
     @objc func dockChanged() { app.setDockEdges(dock.state == .on) }
     @objc func opacityChanged() { app.setOpacity(CGFloat(opacity.doubleValue)) }
-    @objc func pixelChanged() { app.setPixel(level.selectedSegment) }
 }
 
 final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDelegate {
@@ -822,20 +744,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     var fadeOnHover = UserDefaults.standard.bool(forKey: "fadeOnHover")
     var dockEdges = UserDefaults.standard.object(forKey: "dockEdges") as? Bool ?? true
     var opacity = CGFloat(UserDefaults.standard.object(forKey: "opacity") as? Double ?? 1)
-    let pixelSizes: [(String, Int?)] = [("Off", nil), ("Fine", 2), ("Medium", 3), ("Coarse", 4)]   // block size in source pixels
-    var pixelSize = App.savedPixelSize()
-    static func savedPixelSize() -> Int {   // before "pixelSize": a Pixel art switch (on by default) and a level of 0 to 2
-        let d = UserDefaults.standard
-        if let i = d.object(forKey: "pixelSize") as? Int { return min(max(i, 0), 3) }
-        return d.object(forKey: "pixelArt") as? Bool ?? true ? min(d.integer(forKey: "pixelLevel"), 2) + 1 : 0
-    }
-    var block: Int? { pixelSizes[pixelSize].1 }
     var sizeIndex: Int? { sizes.firstIndex { $0.1 == height } }
     var voiceIndex: Int { Voice.allCases.firstIndex(of: voice)! }
     /// The settings with a fixed list of choices, for the menu-bar submenus (Settings has its own controls for them).
     lazy var choices: [(title: String, options: [String], current: () -> Int?, set: (Int) -> Void)] = [
         ("Size", sizes.map(\.0), { [unowned self] in sizeIndex }, { [unowned self] in setSize($0) }),
-        ("Pixel Size", pixelSizes.map(\.0), { [unowned self] in pixelSize }, { [unowned self] in setPixel($0) }),
         ("Voice", Voice.allCases.map(\.title), { [unowned self] in voiceIndex }, { [unowned self] in setVoice(Voice.allCases[$0]) })]
     var choiceMenus: [NSMenu] = []
     var settings: SettingsPanel?, spriteGen = 0   // spriteGen numbers the sprite builds, so a slow old one can't replace a newer
@@ -856,7 +769,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.level = UserDefaults.standard.object(forKey: "onTop") as? Bool ?? true ? .floating : .normal
         view = PetView(sprite: characters().first { $0.name == currentCharacter }
-            .flatMap { Sprite($0.dir, block: block) } ?? Sprite(Bundle.main.resourceURL!, block: block)!)
+            .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.dockToEdge() }
         view.onDragStart = { [weak self] in self?.layoutOverlays() }
@@ -935,7 +848,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         bubble.frame = NSRect(x: 4, y: y, width: w - 8, height: min(bubble.fittingHeight(width: w - 8), room))
     }
 
-    func tick() {   // 30fps: slow breathing bob, waiting dots, pixel animation
+    func tick() {   // 30fps: slow breathing bob, waiting dots, animation
         t += 1 / 30
         view.bob = (CGFloat(sin(t * 2 * .pi / 3.2) + 1) * view.spriteHeight * 0.006).rounded()
         if waiting && Int(t * 30) % 12 == 0 { bubble.string = String(repeating: "·", count: Int(t * 2.5) % 3 + 1) }
@@ -965,7 +878,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         lastActive = t
     }
 
-    // pixel animation: one sequence of (pose, seconds) at a time, stepped by tick(); then back to the neutral face.
+    // animation: one sequence of (pose, seconds) at a time, stepped by tick(); then back to the neutral face.
     // A sequence of equal or higher priority replaces the current one; a lower one is dropped.
     enum Priority: Int { case idle, expression, talk }
     var anim: [(Pose, Double)] = [], animPriority = Priority.idle, animStepEnd = 0.0, nextIdle = 2.0
@@ -1278,17 +1191,12 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     func setDockEdges(_ on: Bool) { dockEdges = on; UserDefaults.standard.set(on, forKey: "dockEdges"); dockToEdge() }
     func setOpacity(_ a: CGFloat) { opacity = a; UserDefaults.standard.set(Double(a), forKey: "opacity") }
     func setSize(_ i: Int) { resize(sizes[i].1); settings?.reload() }
-    func setPixel(_ i: Int) {
-        guard i != pixelSize else { return }
-        pixelSize = i; UserDefaults.standard.set(i, forKey: "pixelSize")
-        loadSprite(view.sprite.dir) { [weak self] in if let s = $0 { self?.view.sprite = s; self?.settings?.reload() } }
-    }
-    /// Builds a sprite off the main thread (pixelating takes a few hundred ms), then hands it back on the main thread,
+    /// Builds a sprite off the main thread (decoding every frame), then hands it back on the main thread,
     /// unless a newer build was asked for meanwhile.
     func loadSprite(_ dir: URL, then: @escaping (Sprite?) -> Void) {
-        let block = block; spriteGen += 1; let gen = spriteGen
+        spriteGen += 1; let gen = spriteGen
         DispatchQueue.global(qos: .userInitiated).async {
-            let s = Sprite(dir, block: block)
+            let s = Sprite(dir)
             DispatchQueue.main.async { if gen == self.spriteGen { then(s) } }
         }
     }
@@ -1334,7 +1242,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     @objc func about() {
         let a = NSAlert()
         a.messageText = "Claude desktop pet"
-        a.informativeText = "Character: ZipZipPipe original design; 3-heads-tall pixel version is a derivative work. CC BY-NC-SA 4.0. Non-commercial. Not affiliated with Anthropic."
+        a.informativeText = "Character: ZipZipPipe original design; 3-heads-tall chibi version is a derivative work. CC BY-NC-SA 4.0. Non-commercial. Not affiliated with Anthropic."
         NSApp.activate(ignoringOtherApps: true); a.runModal()
     }
     func applicationWillTerminate(_ n: Notification) { agent.stop() }

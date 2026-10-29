@@ -1,6 +1,6 @@
 # claude-pixel-pet
 
-A small pixel-art Claude that lives on your macOS desktop. You can chat with it, and it keeps an eye on your Claude Code sessions.
+A small chibi Claude that lives on your macOS desktop. You can chat with it, and it keeps an eye on your Claude Code sessions.
 
 一只住在 macOS 桌面上的像素 Claude：点它可以聊天，它也会盯着你的 Claude Code 在干什么。
 
@@ -13,7 +13,7 @@ A small pixel-art Claude that lives on your macOS desktop. You can chat with it,
 | Click the pet | open the input box; Enter sends, Esc closes. Left empty for 30 s, it closes by itself |
 | Right-click the pet | usage panel: plan limits, today's tokens, what's running |
 | Drag the pet | move it; she opens there next time (clicks on the transparent area around her go through). Push her a quarter of the way off the left, right or bottom edge and she docks there, peeking in |
-| Menu-bar ✦ | Session (switch, start one in a folder, Open in Terminal), Stop, Character, Size, Pixel Size, Voice, Settings… (⌘,), Quit |
+| Menu-bar ✦ | Session (switch, start one in a folder, Open in Terminal), Stop, Character, Size, Voice, Settings… (⌘,), Quit |
 
 **Stop** interrupts the turn the pet is running right now, like Esc in Claude Code. The session stays attached, so you can send the next message. Sessions open in your terminal or IDE are not affected.
 
@@ -27,9 +27,9 @@ A small pixel-art Claude that lives on your macOS desktop. You can chat with it,
 - **Usage.** The menu-bar ✦ shows today's output tokens. The menu breaks usage down per account (output, input including cache, number of sessions) and shows the context size of the latest session.
 - **Usage panel.** Right-click the pet for a panel with your plan limits per account (5-hour and weekly, with Opus / Sonnet when your plan has them), the same percentages and reset times as `/usage` in Claude Code, plus today's tokens and what is running now. The first time, macOS asks whether ClaudePet may read Claude Code's login from the keychain; choose Always Allow.
 - **Voice.** What she says types into the bubble a character at a time, about 11 a second, with a short pause at commas and sentence ends; long text speeds up so it finishes in about 5 seconds. Her mouth moves while it types. Pick the sound under Voice in Settings or the menu: **Off**, **Soft** or **8-bit**. **Soft** is a 50 ms sine on a note from C5 to A5, at most every 0.18 s (about every other Chinese character); **8-bit** is a 25% pulse on G5, slightly detuned, with a quick fade, one per character, like an old game's text box. The notes are picked from the text itself, so the same line always has the same tune.
-- **Pixel animation.** She blinks every few seconds. Now and then she reads her book, and very rarely she yawns. Whenever the label above her head is up (a Claude Code session is working) she writes in her book with a quill. After 5 minutes with nothing going on she dozes off hugging the book; clicking her startles her awake, and a message or a new task wakes her with a big yawn, still hugging the book. When a task finishes she yawns the same way. A full-body pose stays up at least a second, so she never flickers between them. Every pose is a full frame with only the eyes and mouth changed, so nothing gets stretched.
-- **Settings.** ✦ → Settings… opens one window with a live preview of the pet and: **Size** (Small, Medium, Large), **Character**, **Voice**, **Opacity** (30% to 100%, always), **Always on top**, **See-through on hover**, **Peek from screen edges** and **Pixel size**: Off (the smooth frames), Fine (2×2 blocks), Medium (3×3) or Coarse (4×4). Everything applies at once and is remembered.
-- **Characters.** Pick one under Character in the menu or in Settings: Claude, or Claude in another outfit: Spring (sakura haori), Summer (straw hat), Autumn (cardigan), Winter (white fur hat), Hoodie, Lab Coat or Librarian, each with the full set of faces and poses. Add your own with **Add Character…**: choose a folder laid out as below and it is copied into `~/Library/Application Support/ClaudePet/Characters/` ("Open Characters Folder…" shows it). Characters stay on your Mac, so art you can't share works too. The shipped characters are smooth 600 px frames; **Pixel size** turns them into pixel art when they load (blocks of 2 to 4 pixels, outlines kept, 64 colours taken from `closed.png` so talking and blinking don't flicker). It applies to every character, including ones you add; set it to Off to show their PNGs as they are.
+- **Animation.** She blinks every few seconds. Now and then she reads her book, and very rarely she yawns. Whenever the label above her head is up (a Claude Code session is working) she writes in her book with a quill. After 5 minutes with nothing going on she dozes off hugging the book; clicking her startles her awake, and a message or a new task wakes her with a big yawn, still hugging the book. When a task finishes she yawns the same way. A full-body pose stays up at least a second, so she never flickers between them. Every pose is a full frame with only the eyes and mouth changed, so nothing gets stretched.
+- **Settings.** ✦ → Settings… opens one window with a live preview of the pet and: **Size** (Small, Medium, Large), **Character**, **Voice**, **Opacity** (30% to 100%, always), **Always on top**, **See-through on hover** and **Peek from screen edges**. Everything applies at once and is remembered.
+- **Characters.** Pick one under Character in the menu or in Settings: Claude, or Claude in another outfit: Spring (sakura haori), Summer (straw hat), Autumn (cardigan), Winter (white fur hat), Hoodie, Lab Coat or Librarian, each with the full set of faces and poses. Add your own with **Add Character…**: choose a folder laid out as below and it is copied into `~/Library/Application Support/ClaudePet/Characters/` ("Open Characters Folder…" shows it). Characters stay on your Mac, so art you can't share works too. The shipped characters are smooth 600 px frames, drawn as they are.
 
   ```
   My Character/          the folder name is the character's name
@@ -84,8 +84,8 @@ Sessions the pet runs itself don't need it: their permission requests already po
 |---|---|
 | `main.swift` | the whole app (AppKit, no dependencies) |
 | `build.sh` | compiles with `swiftc` and packages the `.app` |
-| `Resources/` | smooth sprite frames (the app pixelates them): mouth closed / half / open, plus face poses (blinks, reading, yawn, surprised) and full-body poses; `Characters/<name>/` holds the outfits; `AppIcon.icns` is the app icon |
-| `tools/make_icon.py` | builds `Resources/AppIcon.icns` from a sprite: head and shoulders on a cream plate, every size through `iconutil`; `--pixel 3` pixelates it like the app (the shipped icon), `--square` also writes a square profile picture (numpy, Pillow) |
+| `Resources/` | smooth sprite frames: mouth closed / half / open, plus face poses (blinks, reading, yawn, surprised) and full-body poses; `Characters/<name>/` holds the outfits; `AppIcon.icns` is the app icon |
+| `tools/make_icon.py` | builds `Resources/AppIcon.icns` from a sprite: head and shoulders on a cream plate, every size through `iconutil`; `--pixel 3` pixelates it (the shipped icon), `--square` also writes a square profile picture (numpy, Pillow) |
 | `tools/cutout.py` | cuts a sprite out of its white background and scales it to 600 px; `--white 246` for white clothes (numpy, scipy, Pillow) |
 | `tools/fit_frame.py` | scales and places a full-body pose so its head mark and soles line up with `closed.png`, growing the canvas for raised arms (numpy, OpenCV, Pillow) |
 | `tools/face_frames.py` | gives a new outfit all the face frames by matching its face to Claude's and pasting each frame's eyes and mouth (numpy, Pillow) |
@@ -94,6 +94,6 @@ Sessions the pet runs itself don't need it: their permission requests already po
 ## License
 
 - **Code** (`main.swift`, `build.sh`, `tools/`): MIT. See `LICENSE`.
-- **Character art** (`Resources/`, `docs/preview.png`): derived from the Claude character design by **ZipZipPipe**, which is published under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). The 3-heads-tall pixel version is a derivative work under the same license. **No commercial use.** See `LICENSE-ART`.
+- **Character art** (`Resources/`, `docs/preview.png`): derived from the Claude character design by **ZipZipPipe**, which is published under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). The 3-heads-tall chibi version is a derivative work under the same license. **No commercial use.** See `LICENSE-ART`.
 
 This is a fan project. It is not affiliated with or endorsed by Anthropic. "Claude" is a trademark of Anthropic.
