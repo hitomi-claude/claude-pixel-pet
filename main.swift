@@ -414,10 +414,14 @@ final class Monitor {
             if let cwd = j["cwd"] as? String { st.act.project = (cwd as NSString).lastPathComponent }
             if type == "user" {
                 st.lastUser = max(st.lastUser, ts)
-                let isPrompt = msg["content"] is String || content.contains { $0["type"] as? String == "text" }
-                if isPrompt && !st.act.working { st.act.since = ts }
+                let texts = (msg["content"] as? String).map { [$0] } ?? content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+                // Esc in Claude Code leaves "[Request interrupted by user…]" as the last text: the turn is over
+                if texts.last?.hasPrefix("[Request interrupted by user") == true {
+                    st.act.working = false; st.act.detail = "interrupted"; st.act.last = ts; continue
+                }
+                if !texts.isEmpty && !st.act.working { st.act.since = ts }
                 st.act.working = true
-                if isPrompt { st.act.detail = "thinking" }
+                if !texts.isEmpty { st.act.detail = "thinking" }
             } else {
                 if let u = msg["usage"] as? [String: Any], let id = msg["id"] as? String {
                     let inp = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].reduce(0) { $0 + (u[$1] as? Int ?? 0) }
@@ -1125,7 +1129,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let fresh = act.map { Date().timeIntervalSince($0.last) < 600 } ?? false
         let working = fresh && (act?.working ?? false)
         otherActivity = working ? "\(act!.project): \(act!.detail)" : ""
-        if wasWorking && !working, let a = act, fresh, a.last.timeIntervalSince(a.since) > 20, !agent.busy {
+        if wasWorking && !working, let a = act, fresh, a.detail != "interrupted", a.last.timeIntervalSince(a.since) > 20, !agent.busy {
             say("Done in \(a.project). Your turn.", then: [(.stretch, 1.6)])
         }
         if working || agent.busy { poke() }
