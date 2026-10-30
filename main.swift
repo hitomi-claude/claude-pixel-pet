@@ -200,8 +200,10 @@ final class Sprite {
     private var held: [Pose: NSImage] = [:]   // the clip frames she rests on, decoded on their own and kept
     private(set) var clips: [Clip: [Pose]] = [:]   // the frames of each clip the character has, known a moment after loading
     var animated: Bool { clips[.idle_loop] != nil }   // moves in clips rather than between the stills
+    private(set) var settled = false   // the frames she rests on are decoded: until then she isn't drawn, so no still flashes up
+    var onSettled: (() -> Void)?
     let aspect: CGFloat
-    private let masks: [Pose: (w: Int, h: Int, alpha: [UInt8])]   // of the neutral and the open peek frames, for click-through
+    private var masks: [Pose: (w: Int, h: Int, alpha: [UInt8])]   // of the neutral and the open peek frames (a peek loop's once decoded), for click-through
     init?(_ dir: URL) {
         guard let base = NSImage(contentsOf: Pose.closed.png(in: dir)),
               let cg = base.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
@@ -224,9 +226,18 @@ final class Sprite {
             }
             await MainActor.run { [found] in
                 for (c, f, n, k) in found where n > 0 { clipFiles[c] = f; clipSize[c] = k; clips[c] = (0..<n).map { Pose(c, $0) } }
-                for p in [Pose.closed, .work, .sleep, .read].map(hold) {
-                    guard let c = p.clip, let f = clipFiles[c] else { continue }
-                    Task { let im = await Clip.decode(f, [p.index]).first; await MainActor.run { held[p] = im } }
+                let holds = ([Pose.closed, .work, .sleep, .read] + Clip.peeks.keys).map(hold).filter { $0.clip != nil }
+                var left = holds.count
+                if left == 0 { settle() }
+                for p in holds {
+                    Task {
+                        let im = await Clip.decode(clipFiles[p.clip!]!, [p.index]).first
+                        await MainActor.run {
+                            held[p] = im; left -= 1
+                            if let d = Clip.peeks.first(where: { $0.value == p.clip })?.key, let cg = im?.cgImage(forProposedRect: nil, context: nil, hints: nil) { masks[d] = Sprite.alpha(cg) }
+                            if left == 0 { settle() }
+                        }
+                    }
                 }
             }
         }
@@ -234,8 +245,9 @@ final class Sprite {
     func size(_ p: Pose) -> CGSize { p.clip.flatMap { clipSize[$0] } ?? stillSize[p] ?? CGSize(width: 1, height: 1) }   // relative to closed.png; full-body poses can be bigger
     /// The frame she rests on in a pose: with clips a video frame, so she never jumps back to a differently drawn still.
     func hold(_ p: Pose) -> Pose {
-        (p == .read ? clips[.closed_to_read]?.last : Clip.rests[p].flatMap { clips[$0.loop]?.first }) ?? p
+        (p == .read ? clips[.closed_to_read]?.last : (Clip.rests[p]?.loop ?? Clip.peeks[p]).flatMap { clips[$0]?.first }) ?? p
     }
+    private func settle() { settled = true; onSettled?() }
     /// Whether a frame can be drawn now. A clip frame needs its clip decoded; asking starts that.
     func ready(_ p: Pose) -> Bool {
         guard let c = p.clip, held[p] == nil else { return true }
@@ -285,7 +297,7 @@ final class PetWindow: NSWindow {
 }
 
 final class PetView: NSView {
-    var sprite: Sprite { didSet { needsDisplay = true } }
+    var sprite: Sprite { didSet { needsDisplay = true; sprite.onSettled = { [weak self] in self?.needsDisplay = true } } }
     var spriteHeight: CGFloat = 240
     var pose = Pose.closed { didSet { if pose != oldValue { needsDisplay = true } } }
     var dock: Pose? { didSet { if dock != oldValue { needsDisplay = true } } }   // the peek frame shown instead while docked to an edge
@@ -298,7 +310,7 @@ final class PetView: NSView {
     var onDragStart: (() -> Void)?
     private var dragStart: NSPoint?, moved = false
 
-    init(sprite: Sprite) { self.sprite = sprite; super.init(frame: .zero) }
+    init(sprite: Sprite) { self.sprite = sprite; super.init(frame: .zero); sprite.onSettled = { [weak self] in self?.needsDisplay = true } }
     required init?(coder: NSCoder) { fatalError() }
 
     var spriteRect: NSRect {
@@ -314,6 +326,7 @@ final class PetView: NSView {
     }
     var top: CGFloat { dock == nil ? spriteHeight : shown.rect.maxY }   // where the overlays start
     override func draw(_ dirtyRect: NSRect) {
+        guard sprite.settled else { return }
         NSGraphicsContext.current?.imageInterpolation = .high
         let (p, r) = shown
         sprite.image(p).draw(in: r, from: .zero, operation: .sourceOver, fraction: fade)
@@ -943,8 +956,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let goal: Pose = asleep ? .sleep : statusPill.isHidden ? .closed : .work   // writing for as long as the pill is up
         if goal != rest && anim.isEmpty { play(clip(Clip.rests[rest]?.exit) + clip(Clip.rests[goal]?.enter), .idle); rest = goal }   // through standing
         if animPriority == .idle, let c = anim.first?.0.clip, Clip.peeks.values.contains(c), c != loop { anim = [] }   // moved off that edge
-        if anim.isEmpty && (loop != nil || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
-        var want = anim.first?.0 ?? view.sprite.hold(rest)
+        if anim.isEmpty && (loop.map { !Clip.peeks.values.contains($0) } ?? false || t >= nextIdle) {   // a peek loop only now and then: it sways
+            idleAnimation(); nextIdle = t + .random(in: 2.5...6)
+        }
+        var want = anim.first?.0 ?? view.sprite.hold(rest == .sleep ? rest : view.dock ?? rest)   // on an edge, her peek loop's frame
         if !view.sprite.ready(view.dock.map(want.peek) ?? want) {   // the frame drawn   // its clip is still decoding (a tenth of a second): she stays as she is and the sequence waits
             want = view.pose; if !anim.isEmpty { animStepEnd = t + anim[0].1 }
         }
@@ -1298,13 +1313,17 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     func setDockEdges(_ on: Bool) { dockEdges = on; UserDefaults.standard.set(on, forKey: "dockEdges"); dockToEdge() }
     func setOpacity(_ a: CGFloat) { opacity = a; UserDefaults.standard.set(Double(a), forKey: "opacity") }
     func setSize(_ i: Int) { resize(sizes[i].1); settings?.reload() }
-    /// Builds a sprite off the main thread (loading its PNGs), then hands it back on the main thread,
+    /// Builds a sprite off the main thread (loading its PNGs), then hands it back on the main thread once its resting frames are decoded,
     /// unless a newer build was asked for meanwhile.
     func loadSprite(_ dir: URL, then: @escaping (Sprite?) -> Void) {
         spriteGen += 1; let gen = spriteGen
         DispatchQueue.global(qos: .userInitiated).async {
             let s = Sprite(dir)
-            DispatchQueue.main.async { if gen == self.spriteGen { then(s) } }
+            DispatchQueue.main.async {   // handed over once settled, so the old character stays up meanwhile
+                guard let s else { return then(nil) }
+                let done = { if gen == self.spriteGen { then(s) } }
+                if s.settled { done() } else { s.onSettled = done }
+            }
         }
     }
     func setVoice(_ v: Voice) {
