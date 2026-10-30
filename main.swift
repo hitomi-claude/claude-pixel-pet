@@ -168,35 +168,42 @@ enum Clip: String, CaseIterable {
     static let peeks: [Pose: Clip] = [.peek_bottom: .peek_bottom_loop, .peek_left: .peek_left_loop, .peek_right: .peek_right_loop]   // cut like their peek frame
     var loops: Bool { Clip.rests.values.contains { $0.loop == self } || Clip.peeks.values.contains(self) || self == .talk }
     static let frame = 0.11
-    static let fps = 10   // as tools/pack_clips.swift writes them
-    static func decode(_ url: URL, _ frames: [Int]) async -> [NSImage] {   // those frames in order; all 40 of a loop take about a quarter of a second
+    static let fps = 10   // the timescale tools/pack_clips.swift writes; frames show for `frame` (sampled from 24 fps video, not 10)
+    private static func frames(_ url: URL, _ frames: [Int]) -> AVAssetImageGenerator.Images {   // exact frames, in whatever order they come
         let g = AVAssetImageGenerator(asset: AVURLAsset(url: url)); g.requestedTimeToleranceBefore = .zero; g.requestedTimeToleranceAfter = .zero
+        return g.images(for: frames.map { CMTime(value: CMTimeValue($0), timescale: CMTimeScale(fps)) })
+    }
+    static func decode(_ url: URL, _ frames: [Int]) async -> [NSImage] {   // those frames in order; all 40 of a loop take about a quarter of a second
         var images: [Int: NSImage] = [:]
-        for await r in g.images(for: frames.map { CMTime(value: CMTimeValue($0), timescale: CMTimeScale(fps)) }) {
+        for await r in Clip.frames(url, frames) {
             if let cg = try? r.image { images[Int(r.requestedTime.value)] = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height)) }
         }
         return frames.compactMap { images[$0] }
     }
-    /// Unpacks a clip the first time it's seen: one HEIC per frame under Caches, keyed by the movie's path, size and date (a
-    /// changed movie is unpacked again), written aside and moved in whole. Returns the folder, at once when it's already there.
-    static func unpack(_ url: URL, _ n: Int) async -> URL? {
-        let fm = FileManager.default, a = try? fm.attributesOfItem(atPath: url.path)
-        let key = "\(url.path) \(a?[.size] ?? 0) \((a?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)"
-        let dir = cacheDir.appendingPathComponent("clips/" + SHA256.hash(data: Data(key.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined())
-        if fm.fileExists(atPath: dir.appendingPathComponent("done").path) { return dir }
-        let part = dir.appendingPathExtension("part"); try? fm.removeItem(at: part)
+    /// Where a clip is unpacked: one HEIC per frame under Caches, named by a hash of the movie, so a changed movie gets a new one.
+    static func cache(_ url: URL) -> URL? {
+        (try? Data(contentsOf: url)).map { cacheDir.appendingPathComponent("clips/" + sha256Hex($0).prefix(16)) }
+    }
+    /// Unpacks a clip into its cache, a frame at a time as they decode, written aside and moved in whole; nil if that fails.
+    static func unpack(_ url: URL, _ n: Int, to dir: URL) async -> URL? {
+        let fm = FileManager.default, part = dir.appendingPathExtension("part"); try? fm.removeItem(at: part)
         guard (try? fm.createDirectory(at: part, withIntermediateDirectories: true)) != nil else { return nil }
-        let images = await decode(url, Array(0..<n))
-        guard images.count == n else { return nil }
-        for (i, im) in images.enumerated() {
-            guard let cg = im.cgImage(forProposedRect: nil, context: nil, hints: nil),
-                  let d = CGImageDestinationCreateWithURL(part.appendingPathComponent("\(i).heic") as CFURL, "public.heic" as CFString, 1, nil) else { return nil }
+        var written = 0
+        for await r in Clip.frames(url, Array(0..<n)) {
+            guard let cg = try? r.image, let d = CGImageDestinationCreateWithURL(part.appendingPathComponent("\(r.requestedTime.value).heic") as CFURL, "public.heic" as CFString, 1, nil)
+            else { return nil }
             CGImageDestinationAddImage(d, cg, [kCGImageDestinationLossyCompressionQuality: 0.8] as CFDictionary)
             guard CGImageDestinationFinalize(d) else { return nil }
+            written += 1
         }
-        fm.createFile(atPath: part.appendingPathComponent("done").path, contents: nil)
-        try? fm.removeItem(at: dir)
-        return (try? fm.moveItem(at: part, to: dir)) == nil ? nil : dir
+        return written == n && (try? fm.moveItem(at: part, to: dir)) != nil ? dir : nil
+    }
+    static func pruneCache() {   // unpacked clips nobody used for a month, and unfinished ones; a used folder gets its date touched
+        let fm = FileManager.default, old = Date().addingTimeInterval(-30 * 86400), dir = cacheDir.appendingPathComponent("clips")
+        for f in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        where f.pathExtension == "part" || ((try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast) < old {
+            try? fm.removeItem(at: f)
+        }
     }
 }
 
@@ -219,8 +226,8 @@ final class Sprite {
     private let frames: [Pose: NSImage], stillSize: [Pose: CGSize]
     private var clipFiles: [Clip: URL] = [:], clipSize: [Clip: CGSize] = [:]
     private var decoded: [Clip: [NSImage]] = [:], decoding: Set<Clip> = [], recent: [Clip] = []   // until unpacked, a clip is decoded to play it; the last three stay
-    private var held: [Pose: NSImage] = [:]   // the clip frames she rests on, decoded on their own and kept
-    private var unpacked: [Clip: URL] = [:], current: (pose: Pose, image: NSImage)?   // unpacked clips are read a frame at a time as drawn
+    private var held: [Pose: NSImage] = [:]   // the clip frames she rests on, kept
+    private var unpacked: [Clip: URL] = [:], read: [Pose: NSImage] = [:], reading: Set<Pose> = [], shown: Pose?   // unpacked clips: frames read a few ahead, off the main thread
     private(set) var clips: [Clip: [Pose]] = [:]   // the frames of each clip the character has, known a moment after loading
     var animated: Bool { clips[.idle_loop] != nil }   // moves in clips rather than between the stills
     private(set) var settled = false   // the frames she rests on are decoded: until then she isn't drawn, so no still flashes up
@@ -239,36 +246,35 @@ final class Sprite {
             (p == .closed ? cg : own[p]?.cgImage(forProposedRect: nil, context: nil, hints: nil)).map { (p, Sprite.alpha($0)) }
         })
         let px = CGSize(width: cg.width, height: cg.height)
-        Task {   // each clip's frame count and size from its track, without decoding it; then the frames she rests on
-            var found: [(Clip, URL, Int, CGSize)] = []
+        Task { [weak self] in   // each clip's frame count and size from its track, without decoding it; then the frames she rests on; then unpacking
+            var found: [(Clip, URL, Int, CGSize, URL?)] = []
             for c in Clip.allCases {
                 let f = dir.appendingPathComponent("clips/\(c.rawValue).mov")
                 guard FileManager.default.fileExists(atPath: f.path), let track = try? await AVURLAsset(url: f).loadTracks(withMediaType: .video).first,
                       let (range, size) = try? await track.load(.timeRange, .naturalSize) else { continue }
-                found.append((c, f, Int((range.duration.seconds * Double(Clip.fps)).rounded()), CGSize(width: size.width / px.width, height: size.height / px.height)))
+                let n = Int((range.duration.seconds * Double(Clip.fps)).rounded())
+                if n > 0 { found.append((c, f, n, CGSize(width: size.width / px.width, height: size.height / px.height), Clip.cache(f))) }
             }
-            await MainActor.run { [found] in
-                for (c, f, n, k) in found where n > 0 { clipFiles[c] = f; clipSize[c] = k; clips[c] = (0..<n).map { Pose(c, $0) } }
-                let jobs = found.filter { $0.2 > 0 }.sorted { $0.0.loops && !$1.0.loops }   // the loops first: they play most
-                Task(priority: .utility) {
-                    for (c, f, n, _) in jobs {
-                        guard let d = await Clip.unpack(f, n) else { continue }
-                        await MainActor.run { unpacked[c] = d; decoded[c] = nil; recent.removeAll { $0 == c } }
-                    }
+            for (_, _, _, _, d) in found { if let d { try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: d.path) } }
+            let holds = await MainActor.run { [found, weak self] () -> [(Pose, Pose)] in
+                guard let self else { return [] }
+                for (c, f, n, k, d) in found {
+                    clipFiles[c] = f; clipSize[c] = k; clips[c] = (0..<n).map { Pose(c, $0) }
+                    if let d, FileManager.default.fileExists(atPath: d.path) { unpacked[c] = d }
                 }
-                let holds = ([Pose.closed, .work, .sleep, .read] + Clip.peeks.keys).map(hold).filter { $0.clip != nil }
-                var left = holds.count
-                if left == 0 { settle() }
-                for p in holds {
-                    Task {
-                        let im = await Clip.decode(clipFiles[p.clip!]!, [p.index]).first
-                        await MainActor.run {
-                            held[p] = im; left -= 1
-                            if let d = Clip.peeks.first(where: { $0.value == p.clip })?.key, let cg = im?.cgImage(forProposedRect: nil, context: nil, hints: nil) { masks[d] = Sprite.alpha(cg) }
-                            if left == 0 { settle() }
-                        }
-                    }
-                }
+                return ([Pose.closed, .work, .sleep, .read] + Clip.peeks.keys).map { ($0, self.hold($0)) }.filter { $0.1.clip != nil }
+            }
+            for (pose, p) in holds {   // from the cache when it's there (every launch but the first), else from the movie
+                guard let c = p.clip, let f = found.first(where: { $0.0 == c }) else { continue }
+                var im = f.4.flatMap { NSImage(contentsOf: $0.appendingPathComponent("\(p.index).heic")) }
+                if im == nil { im = await Clip.decode(f.1, [p.index]).first }
+                let mask = Pose.peeks[pose] == nil ? nil : im?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha)
+                await MainActor.run { [weak self, im] in self?.held[p] = im; if let mask { self?.masks[pose] = mask } }   // a peek loop's own outline, for clicks
+            }
+            await MainActor.run { [weak self] in self?.settle() }
+            for (c, f, n, _, d) in found.sorted(by: { $0.0.loops && !$1.0.loops }) {   // the loops first: they play most
+                guard self != nil, let d, !FileManager.default.fileExists(atPath: d.path), let done = await Clip.unpack(f, n, to: d) else { continue }
+                await MainActor.run { [weak self] in self?.unpacked[c] = done; self?.decoded[c] = nil; self?.recent.removeAll { $0 == c } }
             }
         }
     }
@@ -278,9 +284,10 @@ final class Sprite {
         (p == .read ? clips[.closed_to_read]?.last : (Clip.rests[p]?.loop ?? Clip.peeks[p]).flatMap { clips[$0]?.first }) ?? p
     }
     private func settle() { settled = true; onSettled?() }
-    /// Whether a frame can be drawn now. A clip frame needs its clip decoded; asking starts that.
+    /// Whether a frame can be drawn now. A clip frame needs reading from the cache, or before that its clip decoded; asking starts that.
     func ready(_ p: Pose) -> Bool {
-        guard let c = p.clip, held[p] == nil, unpacked[c] == nil else { return true }
+        guard let c = p.clip, held[p] == nil else { return true }
+        if let dir = unpacked[c] { readAhead(p, dir); if read[p] == nil { return false }; shown = p; return true }
         if decoded[c] == nil { prepare(c); return false }
         if recent.last != c { touch(c) }
         return true
@@ -290,22 +297,29 @@ final class Sprite {
         for old in recent.dropLast(3) { decoded[old] = nil }
         recent = Array(recent.suffix(3))
     }
-    func preload(_ cs: [Clip]) { cs.forEach(prepare) }
-    private func prepare(_ c: Clip) {
-        guard unpacked[c] == nil, let f = clipFiles[c], let n = clips[c]?.count, decoding.insert(c).inserted else { return }
+    private func readAhead(_ p: Pose, _ dir: URL) {   // this frame and the next three, each a few ms; the rest are let go
+        guard let c = p.clip, let all = clips[c] else { return }
+        let want = (0..<4).map { all[(p.index + $0) % all.count] }
+        for q in read.keys where !want.contains(q) && q != shown { read[q] = nil }   // what's on screen stays while the next one reads
+        for q in want where read[q] == nil && reading.insert(q).inserted {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let im = CGImageSourceCreateWithURL(dir.appendingPathComponent("\(q.index).heic") as CFURL, nil)
+                    .flatMap { CGImageSourceCreateImageAtIndex($0, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) }
+                DispatchQueue.main.async { self.reading.remove(q); self.read[q] = im.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) } }
+            }
+        }
+    }
+    func prepare(_ c: Clip) {   // ahead of time: decode a clip not unpacked yet, or read an unpacked one's first frames
+        if let dir = unpacked[c], let first = clips[c]?.first { return readAhead(first, dir) }
+        guard let f = clipFiles[c], let n = clips[c]?.count, decoding.insert(c).inserted else { return }
         Task {
             let images = await Clip.decode(f, Array(0..<n))
-            await MainActor.run { decoding.remove(c); decoded[c] = images; touch(c) }
+            await MainActor.run { decoding.remove(c); if unpacked[c] == nil { decoded[c] = images; touch(c) } }
         }
     }
     func image(_ p: Pose) -> NSImage {
-        if let f = frames[p] ?? held[p] { return f }
-        guard let c = p.clip else { return frames[.closed]! }
-        if let dir = unpacked[c] {
-            if current?.pose != p { current = (p, NSImage(contentsOf: dir.appendingPathComponent("\(p.index).heic")) ?? frames[.closed]!) }
-            return current!.image
-        }
-        if let d = decoded[c], p.index < d.count { return d[p.index] }
+        if let f = frames[p] ?? held[p] ?? read[p] { return f }
+        if let c = p.clip, let d = decoded[c], p.index < d.count { return d[p.index] }
         return frames[.closed]!
     }
     static func alpha(_ cg: CGImage) -> (w: Int, h: Int, alpha: [UInt8]) {   // drawn into an alpha-only buffer: one pass, no per-pixel objects
@@ -333,7 +347,7 @@ final class PetWindow: NSWindow {
 }
 
 final class PetView: NSView {
-    var sprite: Sprite { didSet { needsDisplay = true; sprite.onSettled = { [weak self] in self?.needsDisplay = true } } }
+    var sprite: Sprite { didSet { needsDisplay = true } }   // a new one comes settled (loadSprite)
     var spriteHeight: CGFloat = 240
     var pose = Pose.closed { didSet { if pose != oldValue { needsDisplay = true } } }
     var dock: Pose? { didSet { if dock != oldValue { needsDisplay = true } } }   // the peek frame shown instead while docked to an edge
@@ -379,11 +393,13 @@ final class PetView: NSView {
     override func mouseDragged(with e: NSEvent) {
         guard let start = dragStart, let w = window else { return }
         let p = NSEvent.mouseLocation
-        if !moved, let d = dock {   // she stands up while carried, with her head where it was
-            let a = shown.rect, b = spriteRect; dock = nil
-            dragStart = NSPoint(x: start.x - (a.minX + a.width * sprite.headX(d) - b.minX - b.width * sprite.headX(.closed)), y: start.y - (a.maxY - b.maxY))
+        if !moved {
+            if let d = dock {   // she stands up while carried, with her head where it was
+                let a = shown.rect, b = spriteRect; dock = nil
+                dragStart = NSPoint(x: start.x - (a.minX + a.width * sprite.headX(d) - b.minX - b.width * sprite.headX(.closed)), y: start.y - (a.maxY - b.maxY))
+            }
+            onDragStart?()
         }
-        if !moved { onDragStart?() }
         w.setFrameOrigin(NSPoint(x: p.x - dragStart!.x, y: p.y - dragStart!.y)); moved = true
     }
     override func mouseUp(with e: NSEvent) {
@@ -723,11 +739,13 @@ final class PermissionCard: NSView {
 struct Limit { let name: String; let used: Double; let resets: Date? }
 struct LimitError: Error { let text: String }
 
+func sha256Hex(_ d: Data) -> String { SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined() }
+
 /// Keychain item holding a config dir's login, named the way Claude Code names it:
 /// "Claude Code-credentials", plus "-<first 8 hex of sha256(dir)>" for a non-default CLAUDE_CONFIG_DIR.
 func keychainService(_ dir: URL) -> String {
     guard let env = configEnv(dir) else { return "Claude Code-credentials" }
-    let hash = SHA256.hash(data: Data(env.precomposedStringWithCanonicalMapping.utf8)).map { String(format: "%02x", $0) }.joined()
+    let hash = sha256Hex(Data(env.precomposedStringWithCanonicalMapping.utf8))
     return "Claude Code-credentials-\(hash.prefix(8))"
 }
 
@@ -895,6 +913,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     lazy var agent = Agent(target: petChat())
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        DispatchQueue.global(qos: .background).async { Clip.pruneCache() }
         window = PetWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
@@ -903,7 +922,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.dockToEdge() }
-        view.onDragStart = { [weak self] in self?.view.sprite.preload(Array(Clip.peeks.values)); self?.layoutOverlays() }   // her peek loops are ready if she docks
+        view.onDragStart = { [weak self] in guard let self else { return }; Clip.peeks.values.forEach(view.sprite.prepare); layoutOverlays() }   // her peek loops are ready if she docks
         view.dock = UserDefaults.standard.string(forKey: "dock").flatMap { s in Pose.peeks.keys.first { $0.rawValue == s } }
         view.onTouch = { [weak self] in guard let self else { return }; self.poke(self.startle) }
         view.onRightClick = { [weak self] in self?.toggleUsagePanel() }
@@ -992,10 +1011,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         if goal != rest && anim.isEmpty { play(clip(Clip.rests[rest]?.exit) + clip(Clip.rests[goal]?.enter), .idle); rest = goal }   // through standing
         if animPriority == .idle, let c = anim.first?.0.clip, c != loop, view.dock != nil || Clip.peeks.values.contains(c) { anim = [] }   // she moved: a loop for elsewhere stops
         if anim.isEmpty && (loop != nil || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
-        let resting = view.sprite.hold(rest == .sleep ? rest : view.dock ?? rest)   // on an edge, her peek loop's frame
+        let resting = loop.flatMap { view.sprite.clips[$0]?.first } ?? view.sprite.hold(rest)   // the first frame of the loop for where she is
         var want = anim.first?.0 ?? resting
         if !view.sprite.ready(view.dock.map(want.peek) ?? want) {   // the frame drawn is still decoding (a quarter of a second): she stays as she is and the sequence waits
-            want = (view.dock.map(view.pose.peek) ?? view.pose).clip == nil ? resting : view.pose   // never a still that sits a few pixels off
+            want = view.shown.pose.clip == nil ? resting : view.pose   // never a still that sits a few pixels off
             if !anim.isEmpty { animStepEnd = t + anim[0].1 }
         }
         if want.body == view.pose.body { view.pose = want }
