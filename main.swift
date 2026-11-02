@@ -317,11 +317,13 @@ final class Sprite {
             await MainActor.run { decoding.remove(c); if unpacked[c] == nil { decoded[c] = images; touch(c) } }
         }
     }
-    func image(_ p: Pose) -> NSImage {
+    private func loaded(_ p: Pose) -> NSImage? {
         if let f = frames[p] ?? held[p] ?? read[p] { return f }
         if let c = p.clip, let d = decoded[c], p.index < d.count { return d[p.index] }
-        return frames[.closed]!
+        return nil
     }
+    func drawable(_ p: Pose) -> Pose { loaded(p) == nil ? .closed : p }   // a frame not in yet shows closed.png, at closed.png's size
+    func image(_ p: Pose) -> NSImage { loaded(p) ?? frames[.closed]! }
     static func alpha(_ cg: CGImage) -> (w: Int, h: Int, alpha: [UInt8]) {   // drawn into an alpha-only buffer: one pass, no per-pixel objects
         let w = cg.width, h = cg.height
         var alpha = [UInt8](repeating: 0, count: w * h)
@@ -370,7 +372,7 @@ final class PetView: NSView {
     /// The frame drawn and where: the same scale and bottom centre as closed.png, or a peek frame against the bottom
     /// and the edge it peeks from.
     var shown: (pose: Pose, rect: NSRect) {
-        let r = spriteRect, p = dock.map(pose.peek) ?? pose, k = sprite.size(p), w = r.width * k.width
+        let r = spriteRect, p = sprite.drawable(dock.map(pose.peek) ?? pose), k = sprite.size(p), w = r.width * k.width
         let x = dock == .peek_left ? 0 : dock == .peek_right ? bounds.width - w : r.midX - w / 2
         return (p, NSRect(x: x, y: dock == nil ? r.minY : 0, width: w, height: r.height * k.height))
     }
