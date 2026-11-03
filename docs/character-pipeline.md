@@ -1,6 +1,6 @@
 # Making a character or outfit
 
-How the sprites in `Resources/` were made, written so it works for other characters too (claude-bili uses the same art). The result is a folder of 600 px tall transparent PNGs, one per `Pose`, that drops into `Resources/Characters/<name>/` or "Add Character…".
+How the sprites in `Resources/` were made, written so it works for other characters too (claude-bili uses the same art). The result is a folder of 600 px tall transparent PNGs, one per `Pose`, from which the clips are made; the app ships only the clips, in `Resources/Characters/<name>/clips/`.
 
 ```
 original art ──(1) 3 heads tall──(2) pixelize──┐
@@ -68,7 +68,7 @@ For a different character, make its reference set first (a closed-mouth `closed.
 
 ## 6. Check
 
-Put the folder in `Resources/Characters/` (built in, run `./build.sh`) or use "Add Character…", pick it in the Character menu, and watch it talk, blink and idle. Without the step 5 frames a character still works but never moves its face.
+Put the folder in `Resources/Characters/` (built in, run `./build.sh`), pick it in the Character menu, and watch it talk, blink and idle. Without the step 5 frames a character still works but never moves its face.
 
 ## 7. Full-body poses
 
