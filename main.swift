@@ -233,6 +233,7 @@ final class Sprite {
     private(set) var settled = false   // the frames she rests on are decoded: until then she isn't drawn, so no still flashes up
     var onSettled: (() -> Void)?
     let aspect: CGFloat
+    let scale: CGFloat   // closed.png's height over the shipped 600 px, so a taller or shorter sister keeps the same head size; far off it, 1
     private var masks: [Pose: (w: Int, h: Int, alpha: [UInt8])]   // of the neutral and the open peek frames (a peek loop's once decoded), for click-through
     init?(_ dir: URL) {
         guard let base = NSImage(contentsOf: Pose.closed.png(in: dir)),
@@ -241,6 +242,7 @@ final class Sprite {
         let own = Dictionary(uniqueKeysWithValues: Pose.allCases.compactMap { p in NSImage(contentsOf: p.png(in: dir)).map { (p, $0) } })
         frames = Dictionary(uniqueKeysWithValues: Pose.allCases.map { ($0, own[$0] ?? $0.standIn.flatMap { own[$0] } ?? own[.closed]!) })
         aspect = CGFloat(cg.width) / CGFloat(cg.height)
+        let k = CGFloat(cg.height) / 600; scale = (0.8...1.25).contains(k) ? k : 1
         stillSize = frames.mapValues { im in im.representations.first.map { CGSize(width: CGFloat($0.pixelsWide) / CGFloat(cg.width), height: CGFloat($0.pixelsHigh) / CGFloat(cg.height)) } ?? CGSize(width: 1, height: 1) }
         masks = Dictionary(uniqueKeysWithValues: ([.closed] + Pose.peeks.keys).compactMap { p in
             (p == .closed ? cg : own[p]?.cgImage(forProposedRect: nil, context: nil, hints: nil)).map { (p, Sprite.alpha($0)) }
@@ -956,7 +958,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.say("Hello. Click me to chat.") }
     }
 
-    func petSize(_ h: CGFloat) -> NSSize { NSSize(width: max(h * view.sprite.aspect, 300), height: h + headroom) }
+    func petSize(_ h: CGFloat) -> NSSize { let h = h * view.sprite.scale; return NSSize(width: max(h * view.sprite.aspect, 300), height: h + headroom) }
 
     func resize(_ h: CGFloat, keepBottom: Bool = true) {
         let size = petSize(h), w = size.width
@@ -964,7 +966,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         if keepBottom { origin = NSPoint(x: window.frame.midX - w / 2, y: window.frame.minY) }
         else { let v = NSScreen.main!.visibleFrame; origin = NSPoint(x: v.maxX - w - 40, y: v.minY + 10) }
         window.setFrame(NSRect(origin: origin, size: size), display: true)
-        view.spriteHeight = h
+        view.spriteHeight = h * view.sprite.scale
         dockToEdge()
         UserDefaults.standard.set(Double(h), forKey: "height")
     }
