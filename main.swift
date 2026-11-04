@@ -141,11 +141,12 @@ struct Pose: Hashable {
 /// tools/pack_clips.swift, each frame at idle_loop's scale with the feet at the bottom centre. A character needs idle_loop. Every frame shows for `frame`
 /// seconds: a loop (which starts and ends on its pose) is sampled to play in real time, the rest at twice the speed.
 enum Clip: String, CaseIterable {
-    case closed_to_work, work_loop, work_to_closed, closed_to_read, read_to_closed, closed_to_sleep, sleep_loop, sleep_to_closed, surprise, yawn, idle_loop,
+    case closed_to_work, work_loop, closed_to_read, closed_to_sleep, sleep_loop, sleep_to_closed, surprise, yawn, idle_loop,
          peek_bottom_loop, peek_left_loop, peek_right_loop, talk
     /// The poses she rests in: the loop she plays there, and the clips into it from standing and out of it back to standing.
+    /// Without a clip out, the one in plays backwards: she puts the book and quill away as she took them out.
     static let rests: [Pose: (loop: Clip, enter: Clip?, exit: Clip?)] = [
-        .closed: (.idle_loop, nil, nil), .work: (.work_loop, .closed_to_work, .work_to_closed), .sleep: (.sleep_loop, .closed_to_sleep, .sleep_to_closed)]
+        .closed: (.idle_loop, nil, nil), .work: (.work_loop, .closed_to_work, nil), .sleep: (.sleep_loop, .closed_to_sleep, .sleep_to_closed)]
     static let peeks: [Pose: Clip] = [.peek_bottom: .peek_bottom_loop, .peek_left: .peek_left_loop, .peek_right: .peek_right_loop]   // cut like their peek frame
     var loops: Bool { Clip.rests.values.contains { $0.loop == self } || Clip.peeks.values.contains(self) || self == .talk }
     static let frame = 0.11
@@ -261,7 +262,7 @@ final class Sprite {
     private static func shifts(_ found: [(Clip, URL, Int, CGSize, URL?)], _ width: CGFloat) async -> [Clip: (CGFloat, CGFloat)] {
         let idle = (Clip.idle_loop, 0), links: [(Clip, (Clip, Int), (Clip, Int)?)] = [(.closed_to_work, idle, nil), (.closed_to_sleep, idle, nil),
             (.closed_to_read, idle, nil), (.work_loop, (.closed_to_work, -1), nil), (.sleep_loop, (.closed_to_sleep, -1), nil),
-            (.work_to_closed, (.work_loop, -1), idle), (.sleep_to_closed, (.sleep_loop, -1), idle), (.read_to_closed, (.closed_to_read, -1), idle),
+            (.sleep_to_closed, (.sleep_loop, -1), idle),
             (.yawn, idle, idle), (.surprise, idle, idle), (.talk, idle, idle)]
         var masks: [String: (w: Int, h: Int, alpha: [UInt8])] = [:]
         func mask(_ c: Clip, _ i: Int) async -> (w: Int, h: Int, alpha: [UInt8])? {
@@ -1037,7 +1038,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         }
         typeStep()
         let goal: Pose = asleep ? .sleep : statusPill.isHidden ? .closed : .work   // writing for as long as the pill is up
-        if goal != rest && anim.isEmpty { play(clip(Clip.rests[rest]?.exit) + clip(Clip.rests[goal]?.enter), .idle); rest = goal }   // through standing
+        if goal != rest && anim.isEmpty { play(leave(rest) + clip(Clip.rests[goal]?.enter), .idle); rest = goal }   // through standing
         let lp = loop
         if animPriority == .idle, let c = anim.first?.0.clip, c != lp, view.dock != nil || Clip.peeks.values.contains(c) { anim = [] }   // she moved: a loop for elsewhere stops
         if anim.isEmpty && (lp != nil || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
@@ -1062,6 +1063,9 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     func poke(_ wakeup: [(Pose, Double)]? = nil) {
         if asleep { play(wakeup ?? wake, .expression); rest = .closed }
         lastActive = t
+    }
+    func leave(_ p: Pose) -> [(Pose, Double)] {   // back to standing: the clip out, or the one in backwards
+        Clip.rests[p].map { $0.exit.map { clip($0) } ?? clip($0.enter).reversed() } ?? []
     }
     /// A clip's frames, repeated to fill `seconds` if given; none when the character has no such clip.
     func clip(_ c: Clip?, for seconds: Double? = nil) -> [(Pose, Double)] {
@@ -1096,7 +1100,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
     var idleActions: [(chance: Double, seq: [(Pose, Double)])] { [   // the idle loop blinks, and reading holds the clip's last frame
         (0.06, clip(.yawn)),
-        (0.14, clip(.closed_to_read) + [(view.sprite.hold(.read), 4.6)] + clip(.read_to_closed)),
+        (0.14, clip(.closed_to_read) + [(view.sprite.hold(.read), 4.6)] + clip(.closed_to_read).reversed()),
         (0.80, clip(.idle_loop)),
     ] }
     var loop: Clip? {   // the loop she plays where she is: peeking from an edge, writing, or asleep
