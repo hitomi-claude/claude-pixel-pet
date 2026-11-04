@@ -549,6 +549,16 @@ let claudeLaunch: (exe: String, path: String)? = {
     return (exe, lines[lines.count - 2])
 }()
 
+/// A `claude` process with the PATH it needs, on an account's config dir; nil if claude isn't found.
+func claudeProcess(_ args: [String], dir: URL?) -> Process? {
+    guard let launch = claudeLaunch else { return nil }
+    let p = Process(); p.executableURL = URL(fileURLWithPath: launch.exe); p.arguments = args
+    var env = ProcessInfo.processInfo.environment
+    env["CLAUDE_CONFIG_DIR"] = dir.flatMap(configEnv); env["PATH"] = launch.path
+    p.environment = env
+    return p
+}
+
 struct Target {
     var id: String?            // session id; nil = start a new one
     var cwd: String
@@ -593,18 +603,12 @@ final class Agent {
     }
 
     private func start() {
-        guard let launch = claudeLaunch else { onEvent(.failed("I can't find the claude command.")); return }
         var args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                     "--permission-prompt-tool", "stdio"]
         if let id = target.id { args += ["--resume", id] }
         else { let id = UUID().uuidString.lowercased(); target.id = id; args += ["--session-id", id]; onSession(id) }
         if !target.tools { args += ["--tools", "", "--disable-slash-commands", "--append-system-prompt", persona] }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: launch.exe); p.arguments = args
-        var env = ProcessInfo.processInfo.environment
-        env["CLAUDE_CONFIG_DIR"] = target.dir.flatMap(configEnv)
-        env["PATH"] = launch.path
-        p.environment = env
+        guard let p = claudeProcess(args, dir: target.dir) else { onEvent(.failed("I can't find the claude command.")); return }
         p.currentDirectoryURL = URL(fileURLWithPath: target.cwd)
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = Pipe()
@@ -741,11 +745,7 @@ func planLimits(_ dir: URL, refresh: Bool = false, done: @escaping (Result<[Limi
     req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
     URLSession.shared.dataTask(with: req) { body, resp, _ in
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        if status == 401, refresh, let launch = claudeLaunch {
-            var env = ProcessInfo.processInfo.environment
-            env["CLAUDE_CONFIG_DIR"] = configEnv(dir); env["PATH"] = launch.path
-            let p = Process(); p.executableURL = URL(fileURLWithPath: launch.exe); p.environment = env
-            p.arguments = ["-p", "reply OK only", "--model", "haiku", "--tools", "", "--no-session-persistence"]
+        if status == 401, refresh, let p = claudeProcess(["-p", "reply OK only", "--model", "haiku", "--tools", "", "--no-session-persistence"], dir: dir) {
             p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
             p.terminationHandler = { _ in planLimits(dir, done: done) }
             if (try? p.run()) != nil { return }
