@@ -190,10 +190,10 @@ enum Clip: String, CaseIterable {
 
 func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: dir.appendingPathComponent("clips/idle_loop.mov").path) }
 
-/// Characters: Claude (Resources/ in the app), then the outfits and sisters in Resources/Characters.
+/// Characters: Opus (Resources/ in the app), then the outfits and sisters in Resources/Characters.
 func characters() -> [(name: String, dir: URL)] {
     let res = Bundle.main.resourceURL!
-    return [("Claude", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
+    return [("Opus", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
         .filter(isCharacter)
         .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         .map { ($0.lastPathComponent, $0) }
@@ -871,7 +871,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         ("Voice", Voice.allCases.map(\.title), { [unowned self] in voiceIndex }, { [unowned self] in setVoice(Voice.allCases[$0]) })]
     var choiceMenus: [NSMenu] = []
     var settings: SettingsPanel?, spriteGen = 0   // spriteGen numbers the sprite builds, so a slow old one can't replace a newer
-    var currentCharacter: String { UserDefaults.standard.string(forKey: "character") ?? "Claude" }
+    var currentCharacter: String { UserDefaults.standard.string(forKey: "character").map { $0.hasPrefix("Claude") ? "Opus" + $0.dropFirst(6) : $0 } ?? "Opus" }   // named Claude before the rename
     let relative: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f }()
     var sigterm: DispatchSourceSignal?
 
