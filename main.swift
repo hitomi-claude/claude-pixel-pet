@@ -211,10 +211,11 @@ final class Sprite {
     var onSettled: (() -> Void)?
     private(set) var aspect: CGFloat = 1   // of idle_loop, which every size is relative to; known once settled
     private(set) var scale: CGFloat = 1   // idle_loop's height over the shipped 600 px, so a taller or shorter sister keeps the same head size; far off it, 1
-    private var masks: [Pose: (w: Int, h: Int, alpha: [UInt8])] = [:]   // of the frames she stands and peeks on, for click-through
-    private var shift: [Clip: (CGFloat, CGFloat)] = [:]   // sideways at a clip's first and last frame, in idle_loop widths (shifts)
+    typealias Mask = (w: Int, h: Int, alpha: [UInt8])
+    private var masks: [Pose: Mask] = [:]   // of the frames she stands and peeks on, for click-through
+    private var edges: [Clip: (CGFloat, CGFloat)] = [:]   // sideways at a clip's first and last frame, in idle_loop widths (shifts)
     func shift(_ p: Pose) -> CGFloat {   // so her head doesn't jump where one clip hands over to the next
-        guard let c = p.clip, let (a, b) = shift[c], let n = clips[c]?.count, n > 1 else { return 0 }
+        guard let c = p.clip, let (a, b) = edges[c], let n = clips[c]?.count, n > 1 else { return 0 }
         return a + (b - a) * CGFloat(p.index) / CGFloat(n - 1)
     }
     init?(_ dir: URL) {
@@ -241,21 +242,24 @@ final class Sprite {
                 }
                 return ([Pose.closed, .work, .sleep, .read] + Clip.peeks.keys).map { ($0, self.hold($0)) }.filter { $0.1.clip != nil }
             }
-            for (pose, p) in holds {   // from the cache when it's there (every launch but the first), else from the movie
+            for (pose, p) in holds {
                 guard let c = p.clip, let f = found.first(where: { $0.0 == c }) else { continue }
-                var im = f.4.flatMap { NSImage(contentsOf: $0.appendingPathComponent("\(p.index).heic")) }
-                if im == nil { im = await Clip.decode(f.1, [p.index]).first }
+                let im = await Sprite.frame(f, p.index)
                 let mask = pose == .closed || Clip.peeks[pose] != nil ? im?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha) : nil
                 await MainActor.run { [weak self, im] in self?.held[p] = im; if let mask { self?.masks[pose] = mask } }   // her outline, for clicks
             }
             await MainActor.run { [weak self] in self?.settle() }
-            let shift = await Sprite.shifts(found, px.width)
-            await MainActor.run { [weak self] in self?.shift = shift }
+            let edges = await Sprite.shifts(found, px.width)
+            await MainActor.run { [weak self] in self?.edges = edges }
             for (c, f, n, _, d) in found.sorted(by: { $0.0.loops && !$1.0.loops }) {   // the loops first: they play most
                 guard self != nil, let d, !FileManager.default.fileExists(atPath: d.path), let done = await Clip.unpack(f, n, to: d) else { continue }
                 await MainActor.run { [weak self] in self?.unpacked[c] = done; self?.decoded[c] = nil; self?.recent.removeAll { $0 == c } }
             }
         }
+    }
+    private static func frame(_ f: (Clip, URL, Int, CGSize, URL?), _ i: Int) async -> NSImage? {   // from the cache when it's there (every launch but the first), else from the movie
+        if let im = f.4.flatMap({ NSImage(contentsOf: $0.appendingPathComponent("\(i).heic")) }) { return im }
+        return await Clip.decode(f.1, [i]).first
     }
     /// Each clip lined up with the ones it plays between, by the outline of her head: its first frame with the frame before it and,
     /// back to standing, its last with idle_loop's first, sliding from one to the other. The video model doesn't keep her in one place.
@@ -264,37 +268,36 @@ final class Sprite {
             (.closed_to_read, idle, nil), (.work_loop, (.closed_to_work, -1), nil), (.sleep_loop, (.closed_to_sleep, -1), nil),
             (.sleep_to_closed, (.sleep_loop, -1), idle),
             (.yawn, idle, idle), (.surprise, idle, idle), (.talk, idle, idle)]
-        var masks: [String: (w: Int, h: Int, alpha: [UInt8])] = [:]
-        func mask(_ c: Clip, _ i: Int) async -> (w: Int, h: Int, alpha: [UInt8])? {
+        var masks: [Pose: Mask] = [:]
+        func mask(_ c: Clip, _ i: Int) async -> Mask? {
             guard let f = found.first(where: { $0.0 == c }) else { return nil }
-            let n = i < 0 ? f.2 + i : i, key = "\(c)/\(n)"
-            if masks[key] == nil { masks[key] = await Clip.decode(f.1, [n]).first?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha) }
-            return masks[key]
+            let p = Pose(c, i < 0 ? f.2 + i : i)
+            if masks[p] == nil { masks[p] = await frame(f, p.index)?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha) }
+            return masks[p]
         }
         var px: [Clip: (Int, Int)] = [.idle_loop: (0, 0)]   // at the first frame and the last
         func align(_ c: Clip, _ i: Int, _ to: (Clip, Int)) async -> Int? {
             guard let r = px[to.0], let a = await mask(c, i), let b = await mask(to.0, to.1) else { return nil }
-            return (to.1 < 0 ? r.1 : r.0) - offset(a, b)
+            return (to.1 < 0 ? r.1 : r.0) - offset(a, b)   // from the end it lands on: its first frame's or its last's
         }
         for (c, from, to) in links {
             guard let s = await align(c, 0, from) else { continue }
-            var e = s; if let to, let v = await align(c, -1, to) { e = v }
-            px[c] = (s, e)
+            px[c] = (s, to == nil ? s : await align(c, -1, to!) ?? s)
         }
         return px.mapValues { (CGFloat($0.0) / width, CGFloat($0.1) / width) }
     }
     /// How far right `a` sits from `b`, both standing on the bottom centre: the columns of her head (the top third of `b`) matched up.
-    private static func offset(_ a: (w: Int, h: Int, alpha: [UInt8]), _ b: (w: Int, h: Int, alpha: [UInt8])) -> Int {
+    private static func offset(_ a: Mask, _ b: Mask) -> Int {
         guard let top = (0..<b.h).first(where: { y in (0..<b.w).contains { b.alpha[y * b.w + $0] > 128 } }) else { return 0 }
-        let tall = b.h - top, rise = tall * 2 / 3...tall, half = max(a.w, b.w) / 2 + 41   // heights above the bottom
-        func cols(_ m: (w: Int, h: Int, alpha: [UInt8])) -> [Int] {   // opaque count per column, the centre at `half`
+        let reach = 40, tall = b.h - top, rise = tall * 2 / 3...tall, half = max(a.w, b.w) / 2 + reach + 1   // heights above the bottom
+        func cols(_ m: Mask) -> [Int] {   // opaque count per column, the centre at `half`
             var s = [Int](repeating: 0, count: 2 * half + 1)
             for r in rise where r <= m.h { let y = m.h - r; for x in 0..<m.w where m.alpha[y * m.w + x] > 128 { s[x - m.w / 2 + half] += 1 } }
             return s
         }
         let ca = cols(a), cb = cols(b)
-        func cost(_ s: Int) -> Int { (41..<2 * half - 40).reduce(0) { $0 + abs(ca[$1 + s] - cb[$1]) } }
-        return (-40...40).min { cost($0) < cost($1) } ?? 0
+        func cost(_ s: Int) -> Int { (reach + 1..<2 * half - reach).reduce(0) { $0 + abs(ca[$1 + s] - cb[$1]) } }
+        return (-reach...reach).map { ($0, cost($0)) }.min { $0.1 < $1.1 }?.0 ?? 0
     }
     func size(_ p: Pose) -> CGSize { p.clip.flatMap { clipSize[$0] } ?? CGSize(width: 1, height: 1) }   // relative to idle_loop
     /// The frame she rests on in a pose.
@@ -341,7 +344,7 @@ final class Sprite {
         return nil
     }
     func drawable(_ p: Pose, else rest: Pose) -> Pose { image(p) == nil ? hold(rest) : p }   // a frame not in yet shows the one she rests on
-    static func alpha(_ cg: CGImage) -> (w: Int, h: Int, alpha: [UInt8]) {   // drawn into an alpha-only buffer: one pass, no per-pixel objects
+    static func alpha(_ cg: CGImage) -> Mask {   // drawn into an alpha-only buffer: one pass, no per-pixel objects
         let w = cg.width, h = cg.height
         var alpha = [UInt8](repeating: 0, count: w * h)
         CGContext(data: &alpha, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
