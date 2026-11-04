@@ -994,7 +994,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         if goal != rest && anim.isEmpty { play(clip(Clip.rests[rest]?.exit) + clip(Clip.rests[goal]?.enter), .idle); rest = goal }   // through standing
         let lp = loop
         if animPriority == .idle, let c = anim.first?.0.clip, c != lp, view.dock != nil || Clip.peeks.values.contains(c) { anim = [] }   // she moved: a loop for elsewhere stops
-        if anim.isEmpty && (lp != nil || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
+        if anim.isEmpty && (lp != nil || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 50...70) }   // standing, she moves about once a minute
         let resting = lp.flatMap { view.sprite.clips[$0]?.first } ?? view.sprite.hold(rest)   // the first frame of the loop for where she is
         var want = anim.first?.0 ?? resting
         if !view.sprite.ready(view.dock.map(want.peek) ?? want) {   // the frame drawn is still decoding (a quarter of a second): she stays as she is and the sequence waits
