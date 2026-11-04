@@ -188,11 +188,13 @@ enum Clip: String, CaseIterable {
     }
 }
 
+func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: dir.appendingPathComponent("clips/idle_loop.mov").path) }
+
 /// Characters: Claude (Resources/ in the app), then the outfits and sisters in Resources/Characters.
 func characters() -> [(name: String, dir: URL)] {
     let res = Bundle.main.resourceURL!
     return [("Claude", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
-        .filter { FileManager.default.fileExists(atPath: $0.appendingPathComponent("clips/idle_loop.mov").path) }
+        .filter(isCharacter)
         .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         .map { ($0.lastPathComponent, $0) }
 }
@@ -210,7 +212,7 @@ final class Sprite {
     private(set) var scale: CGFloat = 1   // idle_loop's height over the shipped 600 px, so a taller or shorter sister keeps the same head size; far off it, 1
     private var masks: [Pose: (w: Int, h: Int, alpha: [UInt8])] = [:]   // of the frames she stands and peeks on, for click-through
     init?(_ dir: URL) {
-        guard FileManager.default.fileExists(atPath: dir.appendingPathComponent("clips/idle_loop.mov").path) else { return nil }
+        guard isCharacter(dir) else { return nil }
         self.dir = dir
         Task { [weak self] in   // each clip's frame count and size from its track, without decoding it; then the frames she rests on; then unpacking
             var found: [(Clip, URL, Int, CGSize, URL?)] = []
@@ -237,7 +239,7 @@ final class Sprite {
                 guard let c = p.clip, let f = found.first(where: { $0.0 == c }) else { continue }
                 var im = f.4.flatMap { NSImage(contentsOf: $0.appendingPathComponent("\(p.index).heic")) }
                 if im == nil { im = await Clip.decode(f.1, [p.index]).first }
-                let mask = pose != .closed && Clip.peeks[pose] == nil ? nil : im?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha)
+                let mask = pose == .closed || Clip.peeks[pose] != nil ? im?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha) : nil
                 await MainActor.run { [weak self, im] in self?.held[p] = im; if let mask { self?.masks[pose] = mask } }   // her outline, for clicks
             }
             await MainActor.run { [weak self] in self?.settle() }
@@ -286,13 +288,12 @@ final class Sprite {
             await MainActor.run { decoding.remove(c); if unpacked[c] == nil { decoded[c] = images; touch(c) } }
         }
     }
-    private func loaded(_ p: Pose) -> NSImage? {
+    func image(_ p: Pose) -> NSImage? {
         if let f = held[p] ?? read[p] { return f }
         if let c = p.clip, let d = decoded[c], p.index < d.count { return d[p.index] }
         return nil
     }
-    func drawable(_ p: Pose, else rest: Pose) -> Pose { loaded(p) == nil ? hold(rest) : p }   // a frame not in yet shows the one she rests on
-    func image(_ p: Pose) -> NSImage? { loaded(p) }
+    func drawable(_ p: Pose, else rest: Pose) -> Pose { image(p) == nil ? hold(rest) : p }   // a frame not in yet shows the one she rests on
     static func alpha(_ cg: CGImage) -> (w: Int, h: Int, alpha: [UInt8]) {   // drawn into an alpha-only buffer: one pass, no per-pixel objects
         let w = cg.width, h = cg.height
         var alpha = [UInt8](repeating: 0, count: w * h)
@@ -330,7 +331,7 @@ final class PetView: NSView {
     var onDragStart: (() -> Void)?   // the first move of a drag
     private var dragStart: NSPoint?, moved = false
 
-    init(sprite: Sprite) { self.sprite = sprite; super.init(frame: .zero); sprite.onSettled = { [weak self] in self?.needsDisplay = true } }
+    init(sprite: Sprite) { self.sprite = sprite; super.init(frame: .zero) }
     required init?(coder: NSCoder) { fatalError() }
 
     var spriteRect: NSRect {
@@ -980,9 +981,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         typeStep()
         let goal: Pose = asleep ? .sleep : statusPill.isHidden ? .closed : .work   // writing for as long as the pill is up
         if goal != rest && anim.isEmpty { play(clip(Clip.rests[rest]?.exit) + clip(Clip.rests[goal]?.enter), .idle); rest = goal }   // through standing
-        if animPriority == .idle, let c = anim.first?.0.clip, c != loop, view.dock != nil || Clip.peeks.values.contains(c) { anim = [] }   // she moved: a loop for elsewhere stops
-        if anim.isEmpty && (loop != nil || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
-        let resting = loop.flatMap { view.sprite.clips[$0]?.first } ?? view.sprite.hold(rest)   // the first frame of the loop for where she is
+        let lp = loop
+        if animPriority == .idle, let c = anim.first?.0.clip, c != lp, view.dock != nil || Clip.peeks.values.contains(c) { anim = [] }   // she moved: a loop for elsewhere stops
+        if anim.isEmpty && (lp != nil || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
+        let resting = lp.flatMap { view.sprite.clips[$0]?.first } ?? view.sprite.hold(rest)   // the first frame of the loop for where she is
         var want = anim.first?.0 ?? resting
         if !view.sprite.ready(view.dock.map(want.peek) ?? want) {   // the frame drawn is still decoding (a quarter of a second): she stays as she is and the sequence waits
             want = view.pose
@@ -1306,8 +1308,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let s = sessions[item.tag]
         switchTo(Target(id: s.id, cwd: s.cwd, dir: s.dir, tools: true, name: s.label))
     }
-    func pickFolder(_ message: String? = nil) -> URL? {
-        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.message = message ?? ""
+    func pickFolder() -> URL? {
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         NSApp.activate(ignoringOtherApps: true)
         return panel.runModal() == .OK ? panel.url : nil
     }
