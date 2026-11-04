@@ -211,6 +211,11 @@ final class Sprite {
     private(set) var aspect: CGFloat = 1   // of idle_loop, which every size is relative to; known once settled
     private(set) var scale: CGFloat = 1   // idle_loop's height over the shipped 600 px, so a taller or shorter sister keeps the same head size; far off it, 1
     private var masks: [Pose: (w: Int, h: Int, alpha: [UInt8])] = [:]   // of the frames she stands and peeks on, for click-through
+    private var shift: [Clip: (CGFloat, CGFloat)] = [:]   // sideways at a clip's first and last frame, in idle_loop widths (shifts)
+    func shift(_ p: Pose) -> CGFloat {   // so her head doesn't jump where one clip hands over to the next
+        guard let c = p.clip, let (a, b) = shift[c], let n = clips[c]?.count, n > 1 else { return 0 }
+        return a + (b - a) * CGFloat(p.index) / CGFloat(n - 1)
+    }
     init?(_ dir: URL) {
         guard isCharacter(dir) else { return nil }
         self.dir = dir
@@ -243,11 +248,52 @@ final class Sprite {
                 await MainActor.run { [weak self, im] in self?.held[p] = im; if let mask { self?.masks[pose] = mask } }   // her outline, for clicks
             }
             await MainActor.run { [weak self] in self?.settle() }
+            let shift = await Sprite.shifts(found, px.width)
+            await MainActor.run { [weak self] in self?.shift = shift }
             for (c, f, n, _, d) in found.sorted(by: { $0.0.loops && !$1.0.loops }) {   // the loops first: they play most
                 guard self != nil, let d, !FileManager.default.fileExists(atPath: d.path), let done = await Clip.unpack(f, n, to: d) else { continue }
                 await MainActor.run { [weak self] in self?.unpacked[c] = done; self?.decoded[c] = nil; self?.recent.removeAll { $0 == c } }
             }
         }
+    }
+    /// Each clip lined up with the ones it plays between, by the outline of her head: its first frame with the frame before it and,
+    /// back to standing, its last with idle_loop's first, sliding from one to the other. The video model doesn't keep her in one place.
+    private static func shifts(_ found: [(Clip, URL, Int, CGSize, URL?)], _ width: CGFloat) async -> [Clip: (CGFloat, CGFloat)] {
+        let idle = (Clip.idle_loop, 0), links: [(Clip, (Clip, Int), (Clip, Int)?)] = [(.closed_to_work, idle, nil), (.closed_to_sleep, idle, nil),
+            (.closed_to_read, idle, nil), (.work_loop, (.closed_to_work, -1), nil), (.sleep_loop, (.closed_to_sleep, -1), nil),
+            (.work_to_closed, (.work_loop, -1), idle), (.sleep_to_closed, (.sleep_loop, -1), idle), (.read_to_closed, (.closed_to_read, -1), idle),
+            (.yawn, idle, idle), (.surprise, idle, idle), (.talk, idle, idle)]
+        var masks: [String: (w: Int, h: Int, alpha: [UInt8])] = [:]
+        func mask(_ c: Clip, _ i: Int) async -> (w: Int, h: Int, alpha: [UInt8])? {
+            guard let f = found.first(where: { $0.0 == c }) else { return nil }
+            let n = i < 0 ? f.2 + i : i, key = "\(c)/\(n)"
+            if masks[key] == nil { masks[key] = await Clip.decode(f.1, [n]).first?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha) }
+            return masks[key]
+        }
+        var px: [Clip: (Int, Int)] = [.idle_loop: (0, 0)]   // at the first frame and the last
+        func align(_ c: Clip, _ i: Int, _ to: (Clip, Int)) async -> Int? {
+            guard let r = px[to.0], let a = await mask(c, i), let b = await mask(to.0, to.1) else { return nil }
+            return (to.1 < 0 ? r.1 : r.0) - offset(a, b)
+        }
+        for (c, from, to) in links {
+            guard let s = await align(c, 0, from) else { continue }
+            var e = s; if let to, let v = await align(c, -1, to) { e = v }
+            px[c] = (s, e)
+        }
+        return px.mapValues { (CGFloat($0.0) / width, CGFloat($0.1) / width) }
+    }
+    /// How far right `a` sits from `b`, both standing on the bottom centre: the columns of her head (the top third of `b`) matched up.
+    private static func offset(_ a: (w: Int, h: Int, alpha: [UInt8]), _ b: (w: Int, h: Int, alpha: [UInt8])) -> Int {
+        guard let top = (0..<b.h).first(where: { y in (0..<b.w).contains { b.alpha[y * b.w + $0] > 128 } }) else { return 0 }
+        let tall = b.h - top, rise = tall * 2 / 3...tall, half = max(a.w, b.w) / 2 + 41   // heights above the bottom
+        func cols(_ m: (w: Int, h: Int, alpha: [UInt8])) -> [Int] {   // opaque count per column, the centre at `half`
+            var s = [Int](repeating: 0, count: 2 * half + 1)
+            for r in rise where r <= m.h { let y = m.h - r; for x in 0..<m.w where m.alpha[y * m.w + x] > 128 { s[x - m.w / 2 + half] += 1 } }
+            return s
+        }
+        let ca = cols(a), cb = cols(b)
+        func cost(_ s: Int) -> Int { (41..<2 * half - 40).reduce(0) { $0 + abs(ca[$1 + s] - cb[$1]) } }
+        return (-40...40).min { cost($0) < cost($1) } ?? 0
     }
     func size(_ p: Pose) -> CGSize { p.clip.flatMap { clipSize[$0] } ?? CGSize(width: 1, height: 1) }   // relative to idle_loop
     /// The frame she rests on in a pose.
@@ -342,7 +388,7 @@ final class PetView: NSView {
     /// and the edge it peeks from.
     var shown: (pose: Pose, rect: NSRect) {
         let r = spriteRect, p = sprite.drawable(dock.map(pose.peek) ?? pose, else: dock ?? .closed), k = sprite.size(p), w = r.width * k.width
-        let x = dock == .peek_left ? 0 : dock == .peek_right ? bounds.width - w : r.midX - w / 2
+        let x = dock == .peek_left ? 0 : dock == .peek_right ? bounds.width - w : r.midX - w / 2 + sprite.shift(p) * r.width
         return (p, NSRect(x: x, y: dock == nil ? r.minY : 0, width: w, height: r.height * k.height))
     }
     var top: CGFloat { dock == nil ? spriteHeight : shown.rect.maxY }   // where the overlays start
