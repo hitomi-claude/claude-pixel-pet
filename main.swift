@@ -721,8 +721,9 @@ func keychainService(_ dir: URL) -> String {
 }
 
 /// Fetches the plan limits for one account; `done` runs on a background queue. Best-effort: this reads Claude Code's
-/// private credential layout and an undocumented endpoint.
-func planLimits(_ dir: URL, done: @escaping (Result<[Limit], LimitError>) -> Void) {
+/// private credential layout and an undocumented endpoint. On a 401 with `refresh`, has Claude Code renew the login
+/// with a tiny headless haiku turn (it rotates the token itself, so the keychain item stays its own) and retries once.
+func planLimits(_ dir: URL, refresh: Bool = false, done: @escaping (Result<[Limit], LimitError>) -> Void) {
     // Read through /usr/bin/security, as Claude Code does: the item trusts that tool, so there's no prompt. Reading it
     // directly asks again whenever Claude Code rewrites the item on a token refresh, even after "Always Allow".
     // Account = the user name, as Claude Code stores it; stray items with other accounts can share the service name.
@@ -740,6 +741,15 @@ func planLimits(_ dir: URL, done: @escaping (Result<[Limit], LimitError>) -> Voi
     req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
     URLSession.shared.dataTask(with: req) { body, resp, _ in
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 401, refresh, let launch = claudeLaunch {
+            var env = ProcessInfo.processInfo.environment
+            env["CLAUDE_CONFIG_DIR"] = configEnv(dir); env["PATH"] = launch.path
+            let p = Process(); p.executableURL = URL(fileURLWithPath: launch.exe); p.environment = env
+            p.arguments = ["-p", "reply OK only", "--model", "haiku", "--tools", "", "--no-session-persistence"]
+            p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            p.terminationHandler = { _ in planLimits(dir, done: done) }
+            if (try? p.run()) != nil { return }
+        }
         guard status == 200, let body, let j = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
             return done(.failure(LimitError(text: status == 401 ? "login expired, open Claude Code once" : "unavailable (\(status))")))
         }
@@ -857,6 +867,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }()
     let resetFormat: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE HH:mm"; return f }()
     var limits: [String: Result<[Limit], LimitError>] = [:], limitsFetched = Date.distantPast   // per account label
+    var loginRefreshed: [String: Date] = [:]   // per account label; renewing costs a haiku turn, so at most every 10 min
     let headroom: CGFloat = 230
     let sizes: [(String, CGFloat)] = [("Small", 160), ("Medium", 240), ("Large", 340)]
     var height: CGFloat { CGFloat(UserDefaults.standard.object(forKey: "height") as? Double ?? 240) }
@@ -1207,8 +1218,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         guard Date().timeIntervalSince(limitsFetched) > 60 else { return }
         limitsFetched = Date()
         for a in accounts {
+            let refresh = Date().timeIntervalSince(loginRefreshed[a.label] ?? .distantPast) > 600
+            if refresh { loginRefreshed[a.label] = Date() }
             DispatchQueue.global(qos: .utility).async {
-                planLimits(a.dir) { r in DispatchQueue.main.async { self.limits[a.label] = r; if self.usagePopover.isShown { self.updateUsagePanel() } } }
+                planLimits(a.dir, refresh: refresh) { r in DispatchQueue.main.async { self.limits[a.label] = r; if self.usagePopover.isShown { self.updateUsagePanel() } } }
             }
         }
     }
