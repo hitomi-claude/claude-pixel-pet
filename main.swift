@@ -186,7 +186,7 @@ enum Clip: String, CaseIterable {
 
 func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: dir.appendingPathComponent("clips/idle_loop.mov").path) }
 
-/// Characters: Opus (Resources/ in the app), then the outfits and sisters in Resources/Characters.
+/// Characters: Opus (Resources/ in the app), then the outfits in Resources/Characters.
 func characters() -> [(name: String, dir: URL)] {
     let res = Bundle.main.resourceURL!
     return [("Opus", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
