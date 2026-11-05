@@ -126,29 +126,24 @@ struct Tune: RandomNumberGenerator {
 
 // MARK: sprite
 
-/// A frame of a clip, or a pose she rests in (standing, writing, reading, asleep, or peeking from the edge of the screen
-/// she's docked to), which shows a clip's frame (hold).
+/// A frame of a clip, or a pose she rests in (standing, writing, reading or asleep), which shows a clip's frame (hold).
 struct Pose: Hashable {
     let rawValue: String, clip: Clip?, index: Int
     init(_ name: String) { rawValue = name; clip = nil; index = 0 }
     init(_ c: Clip, _ i: Int) { rawValue = "\(c.rawValue)/\(i)"; clip = c; index = i }
-    static let closed = Pose("closed"), read = Pose("read"), sleep = Pose("sleep"), work = Pose("work"),
-               peek_bottom = Pose("peek_bottom"), peek_left = Pose("peek_left"), peek_right = Pose("peek_right")
-    func peek(_ dock: Pose) -> Pose { clip == Clip.peeks[dock] ? self : dock }   // docked, only her peek loop is cut for the edge
+    static let closed = Pose("closed"), read = Pose("read"), sleep = Pose("sleep"), work = Pose("work")
 }
 
 /// Motion between and around the poses, from a video model: <character>/clips/<clip>.mov, HEVC with alpha made by
 /// tools/pack_clips.swift, each frame at idle_loop's scale with the feet at the bottom centre. A character needs idle_loop. Every frame shows for `frame`
 /// seconds: a loop (which starts and ends on its pose) is sampled to play in real time, the rest at twice the speed.
 enum Clip: String, CaseIterable {
-    case closed_to_work, work_loop, closed_to_read, closed_to_sleep, sleep_loop, sleep_to_closed, surprise, yawn, idle_loop,
-         peek_bottom_loop, peek_left_loop, peek_right_loop, talk
+    case closed_to_work, work_loop, closed_to_read, closed_to_sleep, sleep_loop, sleep_to_closed, surprise, yawn, idle_loop, talk
     /// The poses she rests in: the loop she plays there, and the clips into it from standing and out of it back to standing.
-    /// Without a clip out, the one in plays backwards: she puts the book and quill away as she took them out.
+    /// Without a clip out (or a character without that clip), the one in plays backwards: she puts the book and quill away as she took them out.
     static let rests: [Pose: (loop: Clip, enter: Clip?, exit: Clip?)] = [
         .closed: (.idle_loop, nil, nil), .work: (.work_loop, .closed_to_work, nil), .sleep: (.sleep_loop, .closed_to_sleep, .sleep_to_closed)]
-    static let peeks: [Pose: Clip] = [.peek_bottom: .peek_bottom_loop, .peek_left: .peek_left_loop, .peek_right: .peek_right_loop]   // cut like their peek frame
-    var loops: Bool { Clip.rests.values.contains { $0.loop == self } || Clip.peeks.values.contains(self) || self == .talk }
+    var loops: Bool { Clip.rests.values.contains { $0.loop == self } || self == .talk }
     static let frame = 0.11
     static let fps = 10   // the timescale tools/pack_clips.swift writes; frames show for `frame` (sampled from 24 fps video, not 10)
     private static func frames(_ url: URL, _ frames: [Int]) -> AVAssetImageGenerator.Images {   // exact frames, in whatever order they come
@@ -212,7 +207,7 @@ final class Sprite {
     private(set) var aspect: CGFloat = 1   // of idle_loop, which every size is relative to; known once settled
     private(set) var scale: CGFloat = 1   // idle_loop's height over the shipped 600 px, so a taller or shorter sister keeps the same head size; far off it, 1
     typealias Mask = (w: Int, h: Int, alpha: [UInt8])
-    private var masks: [Pose: Mask] = [:]   // of the frames she stands and peeks on, for click-through
+    private var masks: [Pose: Mask] = [:]   // of the frame she stands on, for click-through
     private var edges: [Clip: (CGFloat, CGFloat)] = [:]   // sideways at a clip's first and last frame, in idle_loop widths (shifts)
     func shift(_ p: Pose) -> CGFloat {   // so her head doesn't jump where one clip hands over to the next
         guard let c = p.clip, let (a, b) = edges[c], let n = clips[c]?.count, n > 1 else { return 0 }
@@ -240,12 +235,12 @@ final class Sprite {
                     clipFiles[c] = f; clipSize[c] = CGSize(width: size.width / px.width, height: size.height / px.height); clips[c] = (0..<n).map { Pose(c, $0) }
                     if let d, FileManager.default.fileExists(atPath: d.path) { unpacked[c] = d }
                 }
-                return ([Pose.closed, .work, .sleep, .read] + Clip.peeks.keys).map { ($0, self.hold($0)) }.filter { $0.1.clip != nil }
+                return [Pose.closed, .work, .sleep, .read].map { ($0, self.hold($0)) }.filter { $0.1.clip != nil }
             }
             for (pose, p) in holds {
                 guard let c = p.clip, let f = found.first(where: { $0.0 == c }) else { continue }
                 let im = await Sprite.frame(f, p.index)
-                let mask = pose == .closed || Clip.peeks[pose] != nil ? im?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha) : nil
+                let mask = pose == .closed ? im?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha) : nil
                 await MainActor.run { [weak self, im] in self?.held[p] = im; if let mask { self?.masks[pose] = mask } }   // her outline, for clicks
             }
             await MainActor.run { [weak self] in self?.settle() }
@@ -302,7 +297,7 @@ final class Sprite {
     func size(_ p: Pose) -> CGSize { p.clip.flatMap { clipSize[$0] } ?? CGSize(width: 1, height: 1) }   // relative to idle_loop
     /// The frame she rests on in a pose.
     func hold(_ p: Pose) -> Pose {
-        (p == .read ? clips[.closed_to_read]?.last : (Clip.rests[p]?.loop ?? Clip.peeks[p]).flatMap { clips[$0]?.first }) ?? p
+        (p == .read ? clips[.closed_to_read]?.last : Clip.rests[p].flatMap { clips[$0.loop]?.first }) ?? p
     }
     private func settle() { settled = true; onSettled?() }
     /// Whether a frame can be drawn now. A clip frame needs reading from the cache, or before that its clip decoded; asking starts that.
@@ -351,12 +346,6 @@ final class Sprite {
                   bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue)!.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
         return (w, h, alpha)
     }
-    func has(_ p: Pose) -> Bool { masks[p] != nil }   // a peek loop of its own
-    func headX(_ pose: Pose) -> CGFloat {   // the middle of her head across the frame (0...1): of the top tenth of it
-        guard let m = masks[pose] else { return 0.5 }
-        let xs = (0..<max(m.h / 10, 1)).flatMap { y in (0..<m.w).filter { m.alpha[y * m.w + $0] > 25 } }
-        return xs.isEmpty ? 0.5 : CGFloat(xs.reduce(0, +)) / CGFloat(xs.count * m.w)
-    }
     func opaque(_ pose: Pose, atUnit p: CGPoint) -> Bool {   // p in 0...1, origin bottom-left
         guard let m = masks[pose] else { return false }
         let x = Int(p.x * CGFloat(m.w)), y = Int((1 - p.y) * CGFloat(m.h))
@@ -372,7 +361,6 @@ final class PetView: NSView {
     var sprite: Sprite { didSet { needsDisplay = true } }   // a new one comes settled (loadSprite)
     var spriteHeight: CGFloat = 240
     var pose = Pose.closed { didSet { if pose != oldValue { needsDisplay = true } } }
-    var dock: Pose? { didSet { if dock != oldValue { needsDisplay = true } } }   // the peek frame shown instead while docked to an edge
     var fade: CGFloat = 1 { didSet { if fade != oldValue { needsDisplay = true } } }  // sprite opacity
     var onClick: (() -> Void)?
     var onMoved: (() -> Void)?
@@ -388,14 +376,12 @@ final class PetView: NSView {
         let w = spriteHeight * sprite.aspect
         return NSRect(x: (bounds.width - w) / 2, y: 0, width: w, height: spriteHeight)
     }
-    /// The frame drawn and where: the same scale and bottom centre as idle_loop, or a peek frame against the bottom
-    /// and the edge it peeks from.
+    /// The frame drawn and where: the same scale and bottom centre as idle_loop.
     var shown: (pose: Pose, rect: NSRect) {
-        let r = spriteRect, p = sprite.drawable(dock.map(pose.peek) ?? pose, else: dock ?? .closed), k = sprite.size(p), w = r.width * k.width
-        let x = dock == .peek_left ? 0 : dock == .peek_right ? bounds.width - w : r.midX - w / 2 + sprite.shift(p) * r.width
-        return (p, NSRect(x: x, y: dock == nil ? r.minY : 0, width: w, height: r.height * k.height))
+        let r = spriteRect, p = sprite.drawable(pose, else: .closed), k = sprite.size(p), w = r.width * k.width
+        return (p, NSRect(x: r.midX - w / 2 + sprite.shift(p) * r.width, y: r.minY, width: w, height: r.height * k.height))
     }
-    var top: CGFloat { dock == nil ? spriteHeight : shown.rect.maxY }   // where the overlays start
+    var top: CGFloat { spriteHeight }   // where the overlays start
     override func draw(_ dirtyRect: NSRect) {
         guard sprite.settled else { return }
         NSGraphicsContext.current?.imageInterpolation = .high
@@ -405,23 +391,17 @@ final class PetView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         let p = convert(point, from: superview)
         for v in subviews.reversed() where !v.isHidden && v.frame.contains(p) { return v.hitTest(point) }
-        let (pose, r) = dock.map { ($0, shown.rect) } ?? (.closed, spriteRect)
+        let r = spriteRect
         guard r.contains(p) else { return nil }
-        return sprite.opaque(pose, atUnit: CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)) ? self : nil
+        return sprite.opaque(.closed, atUnit: CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)) ? self : nil
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with e: NSEvent) { onTouch?(); dragStart = e.locationInWindow; moved = false }
     override func mouseDragged(with e: NSEvent) {
         guard let start = dragStart, let w = window else { return }
         let p = NSEvent.mouseLocation
-        if !moved {
-            if let d = dock {   // she stands up while carried, with her head where it was
-                let a = shown.rect, b = spriteRect; dock = nil
-                dragStart = NSPoint(x: start.x - (a.minX + a.width * sprite.headX(d) - b.minX - b.width * sprite.headX(.closed)), y: start.y - (a.maxY - b.maxY))
-            }
-            onDragStart?()
-        }
-        w.setFrameOrigin(NSPoint(x: p.x - dragStart!.x, y: p.y - dragStart!.y)); moved = true
+        if !moved { onDragStart?() }
+        w.setFrameOrigin(NSPoint(x: p.x - start.x, y: p.y - start.y)); moved = true
     }
     override func mouseUp(with e: NSEvent) {
         if moved { onMoved?() } else { onClick?() }
@@ -832,23 +812,22 @@ final class SettingsPanel: NSObject {
     unowned let app: App
     let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let size = NSPopUpButton(), character = NSPopUpButton(), preview = SpritePreview()
-    let top: NSButton, fade: NSButton, dock: NSButton
+    let top: NSButton, fade: NSButton
     let voice: NSSegmentedControl, opacity = NSSlider(value: 1, minValue: 0.3, maxValue: 1, target: nil, action: nil)
 
     init(_ app: App) {
         self.app = app
         top = NSButton(checkboxWithTitle: "Always on top", target: nil, action: nil)
         fade = NSButton(checkboxWithTitle: "See-through on hover", target: nil, action: nil)
-        dock = NSButton(checkboxWithTitle: "Peek from screen edges", target: nil, action: nil)
         voice = NSSegmentedControl(labels: Voice.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
         super.init()
         size.addItems(withTitles: app.sizes.map(\.0))
         for (c, a) in [(size, #selector(sizeChanged)), (character, #selector(characterChanged)), (voice, #selector(voiceChanged))] { c.target = self; c.action = a }
-        for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged)), (dock, #selector(dockChanged))] { c.target = self; c.action = a }
+        for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged))] { c.target = self; c.action = a }
         opacity.target = self; opacity.action = #selector(opacityChanged)
         let label = { (t: String) in NSTextField(labelWithString: t) }
         let grid = NSGridView(views: [
-            [label("Size"), size], [label("Character"), character], [label("Voice"), voice], [label("Opacity"), opacity], [NSView(), top], [NSView(), fade], [NSView(), dock]])
+            [label("Size"), size], [label("Character"), character], [label("Voice"), voice], [label("Opacity"), opacity], [NSView(), top], [NSView(), fade]])
         grid.rowSpacing = 10; grid.columnSpacing = 12; grid.column(at: 0).xPlacement = .trailing
         let row = NSStackView(views: [preview, grid]); row.spacing = 24; row.alignment = .centerY
         let box = NSView(); row.translatesAutoresizingMaskIntoConstraints = false; box.addSubview(row)
@@ -868,7 +847,6 @@ final class SettingsPanel: NSObject {
         preview.sprite = app.view.sprite
         voice.selectedSegment = app.voiceIndex
         top.state = app.window.level == .floating ? .on : .off; fade.state = app.fadeOnHover ? .on : .off
-        dock.state = app.dockEdges ? .on : .off
         opacity.doubleValue = Double(app.opacity)
     }
     @objc func sizeChanged() { app.setSize(size.indexOfSelectedItem) }
@@ -876,7 +854,6 @@ final class SettingsPanel: NSObject {
     @objc func voiceChanged() { app.setVoice(Voice.allCases[voice.selectedSegment]) }
     @objc func topChanged() { app.setTop(top.state == .on) }
     @objc func fadeChanged() { app.setFade(fade.state == .on) }
-    @objc func dockChanged() { app.setDockEdges(dock.state == .on) }
     @objc func opacityChanged() { app.setOpacity(CGFloat(opacity.doubleValue)) }
 }
 
@@ -922,7 +899,6 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     let sizes: [(String, CGFloat)] = [("Small", 160), ("Medium", 240), ("Large", 340)]
     var height: CGFloat { CGFloat(UserDefaults.standard.object(forKey: "height") as? Double ?? 240) }
     var fadeOnHover = UserDefaults.standard.bool(forKey: "fadeOnHover")
-    var dockEdges = UserDefaults.standard.object(forKey: "dockEdges") as? Bool ?? true
     var opacity = CGFloat(UserDefaults.standard.object(forKey: "opacity") as? Double ?? 1)
     var sizeIndex: Int? { sizes.firstIndex { $0.1 == height } }
     var voiceIndex: Int { Voice.allCases.firstIndex(of: voice)! }
@@ -952,9 +928,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         view = PetView(sprite: characters().first { $0.name == currentCharacter }
             .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
         view.onClick = { [weak self] in self?.toggleInput() }
-        view.onMoved = { [weak self] in self?.dockToEdge() }
-        view.onDragStart = { [weak self] in guard let self else { return }; Clip.peeks.values.forEach(view.sprite.prepare); layoutOverlays() }   // her peek loops are ready if she docks
-        view.dock = UserDefaults.standard.string(forKey: "dock").flatMap { s in Clip.peeks.keys.first { $0.rawValue == s } }
+        view.onMoved = { [weak self] in self?.placed() }
+        view.onDragStart = { [weak self] in self?.layoutOverlays() }
         view.onTouch = { [weak self] in guard let self else { return }; self.poke(self.startle) }
         view.onRightClick = { [weak self] in self?.toggleUsagePanel() }
         window.contentView = view
@@ -965,7 +940,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         agent.onEvent = { [weak self] e in self?.agentEvent(e) }
         agent.onSession = { [weak self] id in if self?.agent.target.tools == false { self?.petChatID = id } }
         monitor.ignoreSession = { [weak self] in self?.agent.target.id }
-        view.sprite.onSettled = { [weak self] in   // her size and where she docks are known once her clips are
+        view.sprite.onSettled = { [weak self] in   // her size is known once her clips are
             guard let self else { return }
             window.setContentSize(petSize(height))   // borderless: setFrameUsingName restores only the origin
             var restored = window.setFrameUsingName("pet")
@@ -997,23 +972,11 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         else { let v = NSScreen.main!.visibleFrame; origin = NSPoint(x: v.maxX - w - 40, y: v.minY + 10) }
         window.setFrame(NSRect(origin: origin, size: size), display: true)
         view.spriteHeight = h * view.sprite.scale
-        dockToEdge()
+        placed()
         UserDefaults.standard.set(Double(h), forKey: "height")
     }
 
-    /// Docks her to the screen edge she's pushed past by a quarter of her size, or keeps her docked while flush with it (if
-    /// dockEdges is on), showing her peeking from there with the cut edge on the screen's edge; anywhere else she stands. Saves the frame.
-    func dockToEdge() {
-        let v = (window.screen ?? NSScreen.main!).visibleFrame, r = window.convertToScreen(view.convert(view.shown.rect, to: nil))
-        let past: [(Pose, CGFloat)] = [(.peek_bottom, (v.minY - r.minY) / r.height), (.peek_left, (v.minX - r.minX) / r.width), (.peek_right, (r.maxX - v.maxX) / r.width)]
-        let dock = past.filter { dockEdges && view.sprite.has($0.0) && $0.1 > ($0.0 == view.dock ? -0.02 : 0.25) }.max { $0.1 < $1.1 }?.0
-        view.dock = dock; UserDefaults.standard.set(dock?.rawValue, forKey: "dock")
-        var f = window.frame
-        if dock != nil { f.origin.y = max(v.minY, min(f.minY, v.maxY - view.top)) }
-        if dock == .peek_left { f.origin.x = v.minX } else if dock == .peek_right { f.origin.x = v.maxX - f.width }
-        window.setFrameOrigin(f.origin); window.saveFrame(usingName: "pet")
-        layoutOverlays()
-    }
+    func placed() { window.saveFrame(usingName: "pet"); layoutOverlays() }   // after a move or resize: she opens there next time
 
     /// Visibility and frames of everything above the head, from state:
     /// [input] [status pill] [permission card, or else the bubble]. Call after any state change.
@@ -1043,11 +1006,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         let goal: Pose = asleep ? .sleep : statusPill.isHidden ? .closed : .work   // writing for as long as the pill is up
         if goal != rest && anim.isEmpty { play(leave(rest) + clip(Clip.rests[goal]?.enter), .idle); rest = goal }   // through standing
         let lp = loop
-        if animPriority == .idle, let c = anim.first?.0.clip, c != lp, view.dock != nil || Clip.peeks.values.contains(c) { anim = [] }   // she moved: a loop for elsewhere stops
         if anim.isEmpty && (lp != nil || t >= nextIdle) { idleAnimation(); nextIdle = t + .random(in: 2.5...6) }
         let resting = lp.flatMap { view.sprite.clips[$0]?.first } ?? view.sprite.hold(rest)   // the first frame of the loop for where she is
         var want = anim.first?.0 ?? resting
-        if !view.sprite.ready(view.dock.map(want.peek) ?? want) {   // the frame drawn is still decoding (a quarter of a second): she stays as she is and the sequence waits
+        if !view.sprite.ready(want) {   // the frame drawn is still decoding (a quarter of a second): she stays as she is and the sequence waits
             want = view.pose
             if !anim.isEmpty { animStepEnd = t + anim[0].1 }
         }
@@ -1060,7 +1022,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     }
     // dozes off after 5 minutes without a click, a word or a busy Claude Code session; poke() wakes her with a stretch, or with a start when she's clicked
     var lastActive = 0.0, rest = Pose.closed   // the pose she rests in; she moves to another through clips
-    var wake: [(Pose, Double)] { clip(.sleep_to_closed) }
+    var wake: [(Pose, Double)] { leave(.sleep) }
     var startle: [(Pose, Double)] { clip(.surprise) }
     var asleep: Bool { t - lastActive > 300 }
     func poke(_ wakeup: [(Pose, Double)]? = nil) {
@@ -1068,7 +1030,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         lastActive = t
     }
     func leave(_ p: Pose) -> [(Pose, Double)] {   // back to standing: the clip out, or the one in backwards
-        Clip.rests[p].map { $0.exit.map { clip($0) } ?? clip($0.enter).reversed() } ?? []
+        Clip.rests[p].map { r in r.exit.flatMap { view.sprite.clips[$0] != nil ? clip($0) : nil } ?? clip(r.enter).reversed() } ?? []
     }
     /// A clip's frames, repeated to fill `seconds` if given; none when the character has no such clip.
     func clip(_ c: Clip?, for seconds: Double? = nil) -> [(Pose, Double)] {
@@ -1106,11 +1068,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         (0.14, clip(.closed_to_read) + [(view.sprite.hold(.read), 4.6)] + clip(.closed_to_read).reversed()),
         (0.80, clip(.idle_loop)),
     ] }
-    var loop: Clip? {   // the loop she plays where she is: peeking from an edge, writing, or asleep
-        if let d = view.dock, let c = Clip.peeks[d], view.sprite.clips[c] != nil { return c }
-        return rest == .closed ? nil : Clip.rests[rest]?.loop
-    }
-    func idleAnimation() {   // pick one idle action by its chance; peeking, writing or asleep, that loop
+    var loop: Clip? { rest == .closed ? nil : Clip.rests[rest]?.loop }   // the loop she plays where she is: writing or asleep
+    func idleAnimation() {   // pick one idle action by its chance; writing or asleep, that loop
         if let c = loop { play(clip(c), .idle); return }
         var r = Double.random(in: 0..<1)
         for a in idleActions { r -= a.chance; if r < 0 { play(a.seq, .idle); return } }
@@ -1387,7 +1346,6 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     @objc func stopAgent() { agent.interrupt() }
     func setTop(_ on: Bool) { window.level = on ? .floating : .normal; UserDefaults.standard.set(on, forKey: "onTop") }
     func setFade(_ on: Bool) { fadeOnHover = on; UserDefaults.standard.set(on, forKey: "fadeOnHover") }
-    func setDockEdges(_ on: Bool) { dockEdges = on; UserDefaults.standard.set(on, forKey: "dockEdges"); dockToEdge() }
     func setOpacity(_ a: CGFloat) { opacity = a; UserDefaults.standard.set(Double(a), forKey: "opacity") }
     func setSize(_ i: Int) { resize(sizes[i].1); settings?.reload() }
     /// Builds a sprite, then hands it back on the main thread once its resting frames are decoded,
