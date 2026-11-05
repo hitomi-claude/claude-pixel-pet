@@ -205,9 +205,9 @@ final class Sprite {
     private(set) var settled = false   // the frames she rests on are decoded: until then she isn't drawn at all
     var onSettled: (() -> Void)?
     private(set) var aspect: CGFloat = 1   // of idle_loop, which every size is relative to; known once settled
-    private(set) var scale: CGFloat = 1   // idle_loop's height over the shipped 600 px, so a taller or shorter sister keeps the same head size; far off it, 1
+    private(set) var scale: CGFloat = 1   // idle_loop's height over the shipped 600 px, so a taller or shorter character keeps the same head size; far off it, 1
     typealias Mask = (w: Int, h: Int, alpha: [UInt8])
-    private var masks: [Pose: Mask] = [:]   // of the frame she stands on, for click-through
+    private var mask: Mask?   // of the frame she stands on, for click-through
     private var edges: [Clip: (CGFloat, CGFloat)] = [:]   // sideways at a clip's first and last frame, in idle_loop widths (shifts)
     func shift(_ p: Pose) -> CGFloat {   // so her head doesn't jump where one clip hands over to the next
         guard let c = p.clip, let (a, b) = edges[c], let n = clips[c]?.count, n > 1 else { return 0 }
@@ -241,7 +241,7 @@ final class Sprite {
                 guard let c = p.clip, let f = found.first(where: { $0.0 == c }) else { continue }
                 let im = await Sprite.frame(f, p.index)
                 let mask = pose == .closed ? im?.cgImage(forProposedRect: nil, context: nil, hints: nil).map(Sprite.alpha) : nil
-                await MainActor.run { [weak self, im] in self?.held[p] = im; if let mask { self?.masks[pose] = mask } }   // her outline, for clicks
+                await MainActor.run { [weak self, im] in self?.held[p] = im; if let mask { self?.mask = mask } }   // her outline, for clicks
             }
             await MainActor.run { [weak self] in self?.settle() }
             let edges = await Sprite.shifts(found, px.width)
@@ -338,7 +338,7 @@ final class Sprite {
         if let c = p.clip, let d = decoded[c], p.index < d.count { return d[p.index] }
         return nil
     }
-    func drawable(_ p: Pose, else rest: Pose) -> Pose { image(p) == nil ? hold(rest) : p }   // a frame not in yet shows the one she rests on
+    func drawable(_ p: Pose) -> Pose { image(p) == nil ? hold(.closed) : p }   // a frame not in yet shows her standing
     static func alpha(_ cg: CGImage) -> Mask {   // drawn into an alpha-only buffer: one pass, no per-pixel objects
         let w = cg.width, h = cg.height
         var alpha = [UInt8](repeating: 0, count: w * h)
@@ -346,8 +346,8 @@ final class Sprite {
                   bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue)!.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
         return (w, h, alpha)
     }
-    func opaque(_ pose: Pose, atUnit p: CGPoint) -> Bool {   // p in 0...1, origin bottom-left
-        guard let m = masks[pose] else { return false }
+    func opaque(atUnit p: CGPoint) -> Bool {   // on the frame she stands on; p in 0...1, origin bottom-left
+        guard let m = mask else { return false }
         let x = Int(p.x * CGFloat(m.w)), y = Int((1 - p.y) * CGFloat(m.h))
         return x >= 0 && y >= 0 && x < m.w && y < m.h && m.alpha[y * m.w + x] > 25
     }
@@ -366,7 +366,6 @@ final class PetView: NSView {
     var onMoved: (() -> Void)?
     var onRightClick: (() -> Void)?
     var onTouch: (() -> Void)?   // any click or drag
-    var onDragStart: (() -> Void)?   // the first move of a drag
     private var dragStart: NSPoint?, moved = false
 
     init(sprite: Sprite) { self.sprite = sprite; super.init(frame: .zero) }
@@ -378,10 +377,9 @@ final class PetView: NSView {
     }
     /// The frame drawn and where: the same scale and bottom centre as idle_loop.
     var shown: (pose: Pose, rect: NSRect) {
-        let r = spriteRect, p = sprite.drawable(pose, else: .closed), k = sprite.size(p), w = r.width * k.width
+        let r = spriteRect, p = sprite.drawable(pose), k = sprite.size(p), w = r.width * k.width
         return (p, NSRect(x: r.midX - w / 2 + sprite.shift(p) * r.width, y: r.minY, width: w, height: r.height * k.height))
     }
-    var top: CGFloat { spriteHeight }   // where the overlays start
     override func draw(_ dirtyRect: NSRect) {
         guard sprite.settled else { return }
         NSGraphicsContext.current?.imageInterpolation = .high
@@ -393,14 +391,13 @@ final class PetView: NSView {
         for v in subviews.reversed() where !v.isHidden && v.frame.contains(p) { return v.hitTest(point) }
         let r = spriteRect
         guard r.contains(p) else { return nil }
-        return sprite.opaque(.closed, atUnit: CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)) ? self : nil
+        return sprite.opaque(atUnit: CGPoint(x: (p.x - r.minX) / r.width, y: (p.y - r.minY) / r.height)) ? self : nil
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with e: NSEvent) { onTouch?(); dragStart = e.locationInWindow; moved = false }
     override func mouseDragged(with e: NSEvent) {
         guard let start = dragStart, let w = window else { return }
         let p = NSEvent.mouseLocation
-        if !moved { onDragStart?() }
         w.setFrameOrigin(NSPoint(x: p.x - start.x, y: p.y - start.y)); moved = true
     }
     override func mouseUp(with e: NSEvent) {
@@ -928,8 +925,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         view = PetView(sprite: characters().first { $0.name == currentCharacter }
             .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
         view.onClick = { [weak self] in self?.toggleInput() }
-        view.onMoved = { [weak self] in self?.placed() }
-        view.onDragStart = { [weak self] in self?.layoutOverlays() }
+        view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }   // she opens there next time
         view.onTouch = { [weak self] in guard let self else { return }; self.poke(self.startle) }
         view.onRightClick = { [weak self] in self?.toggleUsagePanel() }
         window.contentView = view
@@ -972,11 +968,10 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         else { let v = NSScreen.main!.visibleFrame; origin = NSPoint(x: v.maxX - w - 40, y: v.minY + 10) }
         window.setFrame(NSRect(origin: origin, size: size), display: true)
         view.spriteHeight = h * view.sprite.scale
-        placed()
+        window.saveFrame(usingName: "pet"); layoutOverlays()
         UserDefaults.standard.set(Double(h), forKey: "height")
     }
 
-    func placed() { window.saveFrame(usingName: "pet"); layoutOverlays() }   // after a move or resize: she opens there next time
 
     /// Visibility and frames of everything above the head, from state:
     /// [input] [status pill] [permission card, or else the bubble]. Call after any state change.
@@ -985,8 +980,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         card.isHidden = pending.isEmpty
         if !card.isHidden { bubble.isHidden = true }
         let w = window.frame.width
-        input.frame = NSRect(x: 8, y: view.top + 4, width: w - 16, height: 24)
-        var y = view.top + (input.isHidden ? 6 : 32)
+        input.frame = NSRect(x: 8, y: view.spriteHeight + 4, width: w - 16, height: 24)
+        var y = view.spriteHeight + (input.isHidden ? 6 : 32)
         let fit = statusPill.sizeThatFits(NSSize(width: w - 24, height: .greatestFiniteMagnitude))
         statusPill.frame = NSRect(x: 4, y: y, width: w - 8, height: min(fit.height + 6, 30))
         if !statusPill.isHidden { y += statusPill.frame.height + 4 }
@@ -1030,7 +1025,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         lastActive = t
     }
     func leave(_ p: Pose) -> [(Pose, Double)] {   // back to standing: the clip out, or the one in backwards
-        Clip.rests[p].map { r in r.exit.flatMap { view.sprite.clips[$0] != nil ? clip($0) : nil } ?? clip(r.enter).reversed() } ?? []
+        Clip.rests[p].map { r in let out = clip(r.exit); return out.isEmpty ? clip(r.enter).reversed() : out } ?? []
     }
     /// A clip's frames, repeated to fill `seconds` if given; none when the character has no such clip.
     func clip(_ c: Clip?, for seconds: Double? = nil) -> [(Pose, Double)] {
