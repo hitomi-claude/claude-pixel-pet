@@ -186,10 +186,10 @@ enum Clip: String, CaseIterable {
 
 func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: dir.appendingPathComponent("clips/idle_loop.mov").path) }
 
-/// Characters: Opus (Resources/ in the app), then the outfits in Resources/Characters.
+/// Characters: Claude (Opus) (Resources/ in the app), then the others in Resources/Characters, each named Claude (<name>).
 func characters() -> [(name: String, dir: URL)] {
     let res = Bundle.main.resourceURL!
-    return [("Opus", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
+    return [("Claude (Opus)", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
         .filter(isCharacter)
         .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         .map { ($0.lastPathComponent, $0) }
@@ -905,7 +905,12 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         ("Voice", Voice.allCases.map(\.title), { [unowned self] in voiceIndex }, { [unowned self] in setVoice(Voice.allCases[$0]) })]
     var choiceMenus: [NSMenu] = []
     var settings: SettingsPanel?, spriteGen = 0   // spriteGen numbers the sprite builds, so a slow old one can't replace a newer
-    var currentCharacter: String { UserDefaults.standard.string(forKey: "character").map { $0.hasPrefix("Claude") ? "Opus" + $0.dropFirst(6) : $0 } ?? "Opus" }   // named Claude before the rename
+    var currentCharacter: String {   // every character is "Claude (<name>)"; older saved names were "Claude", "Opus", "Opus (<outfit>)" or the bare name
+        guard let s = UserDefaults.standard.string(forKey: "character") else { return "Claude (Opus)" }
+        if s.hasPrefix("Claude (") { return s }
+        if s == "Claude" || s == "Opus" { return "Claude (Opus)" }
+        return "Claude (" + (s.hasPrefix("Opus (") ? String(s.dropFirst(6).dropLast()) : s) + ")"
+    }
     let relative: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f }()
     var sigterm: DispatchSourceSignal?
 
