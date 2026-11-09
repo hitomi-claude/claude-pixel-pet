@@ -851,7 +851,7 @@ final class SettingsPanel: NSObject {
         size.selectItem(at: app.sizeIndex ?? -1)
         if scan {
             character.removeAllItems()
-            addCharacters(to: character.menu!)
+            addCharacters(to: character.menu!, action: #selector(characterChanged), target: self)
         }
         character.selectItem(withTitle: app.currentCharacter)
         preview.sprite = app.view.sprite
