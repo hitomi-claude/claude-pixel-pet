@@ -19,7 +19,7 @@ Rules for any agent (Claude Code session or otherwise) that changes this repo.
 
 ## Art
 - The character art is CC BY-NC-SA 4.0 by ZipZipPipe (see `LICENSE-ART`). The code is MIT. Keep the credit and the two licenses separate. No commercial use of the art.
-- A character is its clips, `Resources/[Characters/<name>/]clips/<clip>.mov`, packed with `tools/pack_clips.swift`; `idle_loop` about 600 px tall.
+- A character is its clips, `Resources/Characters/<name>/clips/<clip>.mov`, listed in `characterGroups`, packed with `tools/pack_clips.swift`; `idle_loop` about 600 px tall.
 
 ## Issues and PRs
 - Reproduce a bug before fixing it. Review PRs properly, building and running them, before merging or asking for changes.
