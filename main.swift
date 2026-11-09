@@ -191,15 +191,16 @@ func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: di
 let defaultCharacter = "Claude (Opus)"
 let characterGroups = [["Haiku", "Sonnet", "Opus", "Fable", "Mythos"], ["Spring", "Summer", "Autumn", "Winter"]]
 func characters() -> [(name: String, dir: URL, group: Int)] {
-    let res = Bundle.main.resourceURL!
-    func rank(_ n: String) -> (Int, Int) { characterGroups.enumerated().lazy.compactMap { g, ns in ns.firstIndex(of: n).map { (g, $0) } }.first ?? (characterGroups.count, 0) }
-    return ([("Opus", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
-        .filter(isCharacter).map { ($0.lastPathComponent, $0) })
-        .sorted { rank($0.0) != rank($1.0) ? rank($0.0) < rank($1.0) : $0.0.localizedStandardCompare($1.0) == .orderedAscending }
-        .map { ("Claude (\($0.0))", $0.1, rank($0.0).0) }
+    let res = Bundle.main.resourceURL!, order = characterGroups.flatMap { $0 }
+    func rank(_ n: String) -> Int { order.firstIndex(of: n) ?? order.count }
+    func group(_ n: String) -> Int { characterGroups.firstIndex { $0.contains(n) } ?? characterGroups.count }
+    let dirs: [(String, URL)] = [("Opus", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
+        .filter(isCharacter).map { ($0.lastPathComponent, $0) }
+    return dirs.sorted { rank($0.0) != rank($1.0) ? rank($0.0) < rank($1.0) : $0.0.localizedStandardCompare($1.0) == .orderedAscending }
+        .map { ("Claude (\($0.0))", $0.1, group($0.0)) }
 }
 /// The characters into a menu, a separator between groups, each item holding its folder.
-func addCharacters(to menu: NSMenu, action: Selector? = nil, target: AnyObject? = nil) {
+func addCharacters(to menu: NSMenu, action: Selector, target: AnyObject) {
     var last: Int?
     for c in characters() {
         if let l = last, l != c.group { menu.addItem(.separator()) }
@@ -832,7 +833,7 @@ final class SettingsPanel: NSObject {
         voice = NSSegmentedControl(labels: Voice.allCases.map(\.title), trackingMode: .selectOne, target: nil, action: nil)
         super.init()
         size.addItems(withTitles: app.sizes.map(\.0))
-        for (c, a) in [(size, #selector(sizeChanged)), (character, #selector(characterChanged)), (voice, #selector(voiceChanged))] { c.target = self; c.action = a }
+        for (c, a) in [(size, #selector(sizeChanged)), (voice, #selector(voiceChanged))] { c.target = self; c.action = a }
         for (c, a) in [(top, #selector(topChanged)), (fade, #selector(fadeChanged))] { c.target = self; c.action = a }
         opacity.target = self; opacity.action = #selector(opacityChanged)
         let label = { (t: String) in NSTextField(labelWithString: t) }
