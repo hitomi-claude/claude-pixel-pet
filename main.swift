@@ -186,14 +186,26 @@ enum Clip: String, CaseIterable {
 
 func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: dir.appendingPathComponent("clips/idle_loop.mov").path) }
 
-/// Characters, each named Claude (<name>): Claude (Opus) (Resources/ in the app), then the others in Resources/Characters/<name>.
+/// Characters, each named Claude (<name>): Claude (Opus) is Resources/ in the app, the others Resources/Characters/<name>. Listed by
+/// `characterGroups` (the models, then the outfits), any others last by name.
 let defaultCharacter = "Claude (Opus)"
-func characters() -> [(name: String, dir: URL)] {
+let characterGroups = [["Haiku", "Sonnet", "Opus", "Fable", "Mythos"], ["Spring", "Summer", "Autumn", "Winter"]]
+func characters() -> [(name: String, dir: URL, group: Int)] {
     let res = Bundle.main.resourceURL!
-    return [(defaultCharacter, res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
-        .filter(isCharacter)
-        .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-        .map { ("Claude (\($0.lastPathComponent))", $0) }
+    func rank(_ n: String) -> (Int, Int) { characterGroups.enumerated().lazy.compactMap { g, ns in ns.firstIndex(of: n).map { (g, $0) } }.first ?? (characterGroups.count, 0) }
+    return ([("Opus", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
+        .filter(isCharacter).map { ($0.lastPathComponent, $0) })
+        .sorted { rank($0.0) != rank($1.0) ? rank($0.0) < rank($1.0) : $0.0.localizedStandardCompare($1.0) == .orderedAscending }
+        .map { ("Claude (\($0.0))", $0.1, rank($0.0).0) }
+}
+/// The characters into a menu, a separator between groups, each item holding its folder.
+func addCharacters(to menu: NSMenu, action: Selector? = nil, target: AnyObject? = nil) {
+    var last: Int?
+    for c in characters() {
+        if let l = last, l != c.group { menu.addItem(.separator()) }
+        last = c.group
+        let it = menu.addItem(withTitle: c.name, action: action, keyEquivalent: ""); it.target = target; it.representedObject = c.dir
+    }
 }
 
 final class Sprite {
@@ -839,7 +851,7 @@ final class SettingsPanel: NSObject {
         size.selectItem(at: app.sizeIndex ?? -1)
         if scan {
             character.removeAllItems()
-            for c in characters() { character.addItem(withTitle: c.name); character.lastItem?.representedObject = c.dir }
+            addCharacters(to: character.menu!)
         }
         character.selectItem(withTitle: app.currentCharacter)
         preview.sprite = app.view.sprite
@@ -1299,10 +1311,8 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         }
         if menu === characterMenu {
             menu.removeAllItems()
-            for c in characters() {
-                let it = menu.addItem(withTitle: c.name, action: #selector(pickCharacter(_:)), keyEquivalent: "")
-                it.target = self; it.representedObject = c.dir; it.state = c.name == currentCharacter ? .on : .off
-            }
+            addCharacters(to: menu, action: #selector(pickCharacter(_:)), target: self)
+            menu.items.forEach { $0.state = $0.title == currentCharacter ? .on : .off }
             return
         }
         if menu === status.menu {
