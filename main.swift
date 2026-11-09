@@ -927,7 +927,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
             UserDefaults.standard.set(s == "Claude" || s == "Opus" ? "Claude (Opus)" : s.hasPrefix("Opus (") ? "Claude" + s.dropFirst(4) : "Claude (\(s))", forKey: "character")
         }
         DispatchQueue.global(qos: .background).async { Clip.pruneCache() }
-        let saved = UserDefaults.standard.string(forKey: "character"), all = Array(characters().joined())   // the saved one, else the first that opens
+        let saved = UserDefaults.standard.string(forKey: "character") ?? "Claude (Opus)", all = Array(characters().joined())   // the saved one (Opus at first), else the first that opens
         guard let (name, sprite) = (all.filter { $0.name == saved } + all).lazy.compactMap({ c in Sprite(c.dir).map { (c.name, $0) } }).first
         else { return NSApp.terminate(nil) }   // no character, no pet
         currentCharacter = name
