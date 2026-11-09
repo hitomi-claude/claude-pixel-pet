@@ -186,26 +186,20 @@ enum Clip: String, CaseIterable {
 
 func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: dir.appendingPathComponent("clips/idle_loop.mov").path) }
 
-/// Characters, each named Claude (<name>): Claude (Opus) is Resources/ in the app, the others Resources/Characters/<name>. Listed by
-/// `characterGroups` (the models, then the outfits), any others last by name.
+/// Characters, each named Claude (<name>), in the order of `characterGroups` (the models, then the outfits): Claude (Opus) is
+/// Resources/ in the app, the others Resources/Characters/<name>.
 let defaultCharacter = "Claude (Opus)"
 let characterGroups = [["Haiku", "Sonnet", "Opus", "Fable", "Mythos"], ["Spring", "Summer", "Autumn", "Winter"]]
-func characters() -> [(name: String, dir: URL, group: Int)] {
-    let res = Bundle.main.resourceURL!, order = characterGroups.flatMap { $0 }
-    func rank(_ n: String) -> Int { order.firstIndex(of: n) ?? order.count }
-    func group(_ n: String) -> Int { characterGroups.firstIndex { $0.contains(n) } ?? characterGroups.count }
-    let dirs: [(String, URL)] = [("Opus", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
-        .filter(isCharacter).map { ($0.lastPathComponent, $0) }
-    return dirs.sorted { rank($0.0) != rank($1.0) ? rank($0.0) < rank($1.0) : $0.0.localizedStandardCompare($1.0) == .orderedAscending }
-        .map { ("Claude (\($0.0))", $0.1, group($0.0)) }
+func characters() -> [[(name: String, dir: URL)]] {
+    let res = Bundle.main.resourceURL!
+    return characterGroups.map { $0.map { n in (name: "Claude (\(n))", dir: n == "Opus" ? res : res.appendingPathComponent("Characters/\(n)")) }
+        .filter { isCharacter($0.dir) } }.filter { !$0.isEmpty }
 }
 /// The characters into a menu, a separator between groups, each item holding its folder.
 func addCharacters(to menu: NSMenu, action: Selector, target: AnyObject) {
-    var last: Int?
-    for c in characters() {
-        if let l = last, l != c.group { menu.addItem(.separator()) }
-        last = c.group
-        let it = menu.addItem(withTitle: c.name, action: action, keyEquivalent: ""); it.target = target; it.representedObject = c.dir
+    for (i, g) in characters().enumerated() {
+        if i > 0 { menu.addItem(.separator()) }
+        for c in g { let it = menu.addItem(withTitle: c.name, action: action, keyEquivalent: ""); it.target = target; it.representedObject = c.dir }
     }
 }
 
@@ -939,7 +933,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.level = UserDefaults.standard.object(forKey: "onTop") as? Bool ?? true ? .floating : .normal
-        view = PetView(sprite: characters().first { $0.name == currentCharacter }
+        view = PetView(sprite: characters().joined().first { $0.name == currentCharacter }
             .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }   // she opens there next time
