@@ -186,18 +186,15 @@ enum Clip: String, CaseIterable {
 
 func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: dir.appendingPathComponent("clips/idle_loop.mov").path) }
 
-/// Characters, each named Claude (<name>): Claude (Opus) is Resources/ in the app, the others Resources/Characters/<name>. Listed by
-/// `characterGroups` (the models, then the outfits), any others last by name.
+/// Characters, each named Claude (<name>), in the order of `characterGroups` (the models, then the outfits): Claude (Opus) is
+/// Resources/ in the app, the others Resources/Characters/<name>.
 let defaultCharacter = "Claude (Opus)"
 let characterGroups = [["Haiku", "Sonnet", "Opus", "Fable", "Mythos"], ["Spring", "Summer", "Autumn", "Winter"]]
 func characters() -> [(name: String, dir: URL, group: Int)] {
-    let res = Bundle.main.resourceURL!, order = characterGroups.flatMap { $0 }
-    func rank(_ n: String) -> Int { order.firstIndex(of: n) ?? order.count }
-    func group(_ n: String) -> Int { characterGroups.firstIndex { $0.contains(n) } ?? characterGroups.count }
-    let dirs: [(String, URL)] = [("Opus", res)] + ((try? FileManager.default.contentsOfDirectory(at: res.appendingPathComponent("Characters"), includingPropertiesForKeys: nil)) ?? [])
-        .filter(isCharacter).map { ($0.lastPathComponent, $0) }
-    return dirs.sorted { rank($0.0) != rank($1.0) ? rank($0.0) < rank($1.0) : $0.0.localizedStandardCompare($1.0) == .orderedAscending }
-        .map { ("Claude (\($0.0))", $0.1, group($0.0)) }
+    let res = Bundle.main.resourceURL!
+    return characterGroups.enumerated().flatMap { g, ns in ns.map { n in
+        (name: "Claude (\(n))", dir: n == "Opus" ? res : res.appendingPathComponent("Characters/\(n)"), group: g) } }
+        .filter { isCharacter($0.dir) }
 }
 /// The characters into a menu, a separator between groups, each item holding its folder.
 func addCharacters(to menu: NSMenu, action: Selector, target: AnyObject) {
