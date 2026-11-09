@@ -186,13 +186,11 @@ enum Clip: String, CaseIterable {
 
 func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: dir.appendingPathComponent("clips/idle_loop.mov").path) }
 
-/// Characters, each named Claude (<name>), in the order of `characterGroups` (the models, then the outfits): Claude (Opus) is
-/// Resources/ in the app, the others Resources/Characters/<name>.
-let defaultCharacter = "Claude (Opus)"
+/// Characters, each named Claude (<name>) and in Resources/Characters/<name>, in the order of `characterGroups` (the models, then the outfits).
 let characterGroups = [["Haiku", "Sonnet", "Opus", "Fable", "Mythos"], ["Spring", "Summer", "Autumn", "Winter"]]
 func characters() -> [[(name: String, dir: URL)]] {
-    let res = Bundle.main.resourceURL!
-    return characterGroups.map { $0.map { n in (name: "Claude (\(n))", dir: n == "Opus" ? res : res.appendingPathComponent("Characters/\(n)")) }
+    let res = Bundle.main.resourceURL!.appendingPathComponent("Characters")
+    return characterGroups.map { $0.map { (name: "Claude (\($0))", dir: res.appendingPathComponent($0)) }
         .filter { isCharacter($0.dir) } }.filter { !$0.isEmpty }
 }
 /// The characters into a menu, a separator between groups, each item holding its folder.
@@ -913,7 +911,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         ("Voice", Voice.allCases.map(\.title), { [unowned self] in voiceIndex }, { [unowned self] in setVoice(Voice.allCases[$0]) })]
     var choiceMenus: [NSMenu] = []
     var settings: SettingsPanel?, spriteGen = 0   // spriteGen numbers the sprite builds, so a slow old one can't replace a newer
-    var currentCharacter: String { UserDefaults.standard.string(forKey: "character") ?? defaultCharacter }
+    var currentCharacter = ""
     let relative: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f }()
     var sigterm: DispatchSourceSignal?
 
@@ -926,15 +924,18 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
 
     func applicationDidFinishLaunching(_ n: Notification) {
         if let s = UserDefaults.standard.string(forKey: "character"), !s.hasPrefix("Claude (") {   // saved before every name was Claude (<name>)
-            UserDefaults.standard.set(s == "Claude" || s == "Opus" ? defaultCharacter : s.hasPrefix("Opus (") ? "Claude" + s.dropFirst(4) : "Claude (\(s))", forKey: "character")
+            UserDefaults.standard.set(s == "Claude" || s == "Opus" ? "Claude (Opus)" : s.hasPrefix("Opus (") ? "Claude" + s.dropFirst(4) : "Claude (\(s))", forKey: "character")
         }
         DispatchQueue.global(qos: .background).async { Clip.pruneCache() }
+        let saved = UserDefaults.standard.string(forKey: "character"), all = Array(characters().joined())   // the saved one, else the first that opens
+        guard let (name, sprite) = (all.filter { $0.name == saved } + all).lazy.compactMap({ c in Sprite(c.dir).map { (c.name, $0) } }).first
+        else { return NSApp.terminate(nil) }   // no character, no pet
+        currentCharacter = name
         window = PetWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.level = UserDefaults.standard.object(forKey: "onTop") as? Bool ?? true ? .floating : .normal
-        view = PetView(sprite: characters().joined().first { $0.name == currentCharacter }
-            .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
+        view = PetView(sprite: sprite)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }   // she opens there next time
         view.onTouch = { [weak self] in guard let self else { return }; self.poke(self.startle) }
@@ -1378,7 +1379,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
     @objc func pickChoice(_ item: NSMenuItem) { if let i = choiceMenus.firstIndex(where: { $0 === item.menu }) { choices[i].set(item.tag) } }
     @objc func pickCharacter(_ item: NSMenuItem) { if let dir = item.representedObject as? URL { setCharacter(item.title, dir) } }
     func switchCharacter(_ name: String, _ s: Sprite) {
-        UserDefaults.standard.set(name, forKey: "character")
+        UserDefaults.standard.set(name, forKey: "character"); currentCharacter = name
         view.sprite = s; resize(height); settings?.reload(characters: true)
     }
     @objc func openSettings() { settings = settings ?? SettingsPanel(self); settings!.show() }
