@@ -190,19 +190,16 @@ func isCharacter(_ dir: URL) -> Bool { FileManager.default.fileExists(atPath: di
 /// Resources/ in the app, the others Resources/Characters/<name>.
 let defaultCharacter = "Claude (Opus)"
 let characterGroups = [["Haiku", "Sonnet", "Opus", "Fable", "Mythos"], ["Spring", "Summer", "Autumn", "Winter"]]
-func characters() -> [(name: String, dir: URL, group: Int)] {
+func characters() -> [[(name: String, dir: URL)]] {
     let res = Bundle.main.resourceURL!
-    return characterGroups.enumerated().flatMap { g, ns in ns.map { n in
-        (name: "Claude (\(n))", dir: n == "Opus" ? res : res.appendingPathComponent("Characters/\(n)"), group: g) } }
-        .filter { isCharacter($0.dir) }
+    return characterGroups.map { $0.map { n in (name: "Claude (\(n))", dir: n == "Opus" ? res : res.appendingPathComponent("Characters/\(n)")) }
+        .filter { isCharacter($0.dir) } }.filter { !$0.isEmpty }
 }
 /// The characters into a menu, a separator between groups, each item holding its folder.
 func addCharacters(to menu: NSMenu, action: Selector, target: AnyObject) {
-    var last: Int?
-    for c in characters() {
-        if let l = last, l != c.group { menu.addItem(.separator()) }
-        last = c.group
-        let it = menu.addItem(withTitle: c.name, action: action, keyEquivalent: ""); it.target = target; it.representedObject = c.dir
+    for (i, g) in characters().enumerated() {
+        if i > 0 { menu.addItem(.separator()) }
+        for c in g { let it = menu.addItem(withTitle: c.name, action: action, keyEquivalent: ""); it.target = target; it.representedObject = c.dir }
     }
 }
 
@@ -936,7 +933,7 @@ final class App: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSMenuDel
         window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         window.level = UserDefaults.standard.object(forKey: "onTop") as? Bool ?? true ? .floating : .normal
-        view = PetView(sprite: characters().first { $0.name == currentCharacter }
+        view = PetView(sprite: characters().joined().first { $0.name == currentCharacter }
             .flatMap { Sprite($0.dir) } ?? Sprite(Bundle.main.resourceURL!)!)
         view.onClick = { [weak self] in self?.toggleInput() }
         view.onMoved = { [weak self] in self?.window.saveFrame(usingName: "pet") }   // she opens there next time
